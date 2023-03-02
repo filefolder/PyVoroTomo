@@ -267,10 +267,14 @@ def parse_cfg(configuration_file):
             "hvr"
         ).split(",")
     ]
+    _cfg["min_dist"] = parser.getfloat(
+            "algorithm",
+            "min_dist"
+    )
     _cfg["max_dist"] = parser.getfloat(
             "algorithm",
             "max_dist"
-    )    
+    )
     _cfg["nreal"] = parser.getint(
         "algorithm",
         "nreal"

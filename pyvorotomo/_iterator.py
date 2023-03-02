@@ -932,6 +932,9 @@ class InversionIterator(object):
             arrivals = self.arrivals
             arrivals = arrivals[arrivals["phase"] == phase]
 
+            max_dist = self.cfg["algorithm"]["max_dist"]
+            min_dist = self.cfg["algorithm"]["min_dist"]
+            
             # Merge event data.
             events = self.events.rename(
                 columns={
@@ -1006,7 +1009,7 @@ class InversionIterator(object):
             #arrivals["weight"] = dataweight
             # revise this latter, remove data with distance large than 150km
             # let user set the max_dist for phase cutoff
-            idx = arrivals[arrivals['delta']>self.cfg["algorithm"]["max_dist"]].index
+            idx = arrivals[(arrivals['delta']<min_dist) | (arrivals['delta']>max_dist)].index
             dataweight[idx] = dataweight.min()
             arrivals["weight"] = dataweight
 

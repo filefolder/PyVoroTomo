@@ -786,8 +786,14 @@ class InversionIterator(object):
                         columns = ["latitude", "longitude", "depth"]
                         coords = event[columns]
                         coords = geo2sph(coords)
-                        raypath = traveltime.trace_ray(coords)
-                        dataset[:, idx] = raypath.T.copy()
+                        
+                        # attempt to catch/skip bad raypaths
+                        try:
+                            raypath = traveltime.trace_ray(coords)
+                            dataset[:, idx] = raypath.T.copy()
+                        except:
+                            print("WARNING: trace_ray issue, event_id = ", event_id)
+                            continue
 
                     raypath_file.close()
 

@@ -504,6 +504,7 @@ class InversionIterator(object):
                 tag=_constants.DISPATCH_TRANSMISSION_TAG
             )
         # Distribute sentinel.
+        logger.debug("Distribute sentinel")
         for irank in range(WORLD_SIZE - 1):
             requesting_rank = COMM.recv(
                 source=MPI.ANY_SOURCE,
@@ -892,6 +893,8 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
+            if data_range == 0:
+                data_range = 1e-9 # failsafe (RCP)
             data_delta = data - data_min
             data = data_delta / data_range
 
@@ -903,13 +906,21 @@ class InversionIterator(object):
 
             # Initialize an interpolator because FFTKDE is evaluated on a
             # regular grid.
-            interpolator = scipy.interpolate.RegularGridInterpolator(points, values)
+            interpolator = scipy.interpolate.RegularGridInterpolator(points,
+                                                                     values,
+                                                                     bounds_error=False)
 
+            # failsafe
+            interpdat = interpolator(data)
+            if numpy.isnan(interpdat).any():
+                print("WARNING! nans found in interpolator.. fixing..")
+                interpdat = np.nan_to_num(interpdat,nan=1e10)
+            
             # Assign weights to the arrivals.
             if self.iiter<2:
-                events["weight"] = 1.0 / interpolator(data)
+                events["weight"] = 1.0 / interpdat
             elif 2<=self.iiter<4:
-                events["weight"] = 1.0 / np.exp(interpolator(data))
+                events["weight"] = 1.0 / np.exp(interpdat)
             else:
                 events["weight"] = 1.0
 
@@ -997,6 +1008,8 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
+            if data_range == 0:
+                data_range = 1e-10 # failsafe
             data_delta = data - data_min
             data = data_delta / data_range
 
@@ -1008,10 +1021,17 @@ class InversionIterator(object):
 
             # Initialize an interpolator because FFTKDE is evaluated on a
             # regular grid.
-            interpolator = scipy.interpolate.RegularGridInterpolator(points, values)
+            interpolator = scipy.interpolate.RegularGridInterpolator(points,
+                                                                     values,
+                                                                     bounds_error = False)
+            # attempt to safeguard this (testing, RCP)
+            interpdat = interpolator(data)
+            if numpy.isnan(interpdat).any():
+                print("WARNING: nans found in interpolator! fixing...")
+                interpdat = np.nan_to_num(interpdat,nan=1e10)
 
             # Assign weights to the arrivals.
-            dataweight = 1 / np.exp(interpolator(data))
+            dataweight = 1 / np.exp(interpdat)
             #arrivals["weight"] = dataweight
             # revise this latter, remove data with distance large than 150km
             # let user set the max_dist for phase cutoff

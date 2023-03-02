@@ -1005,7 +1005,8 @@ class InversionIterator(object):
             dataweight = 1 / np.exp(interpolator(data))
             #arrivals["weight"] = dataweight
             # revise this latter, remove data with distance large than 150km
-            idx = arrivals[arrivals['delta']>1.2].index
+            # let user set the max_dist for phase cutoff
+            idx = arrivals[arrivals['delta']>self.cfg["algorithm"]["max_dist"]].index
             dataweight[idx] = dataweight.min()
             arrivals["weight"] = dataweight
 

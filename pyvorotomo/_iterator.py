@@ -913,7 +913,7 @@ class InversionIterator(object):
 
             # failsafe
             interpdat = interpolator(data)
-            if numpy.isnan(interpdat).any():
+            if np.isnan(interpdat).any():
                 print("WARNING! nans found in interpolator.. fixing..")
                 interpdat = np.nan_to_num(interpdat,nan=1e10)
             
@@ -1029,7 +1029,7 @@ class InversionIterator(object):
                                                                      bounds_error = False)
             # attempt to safeguard this (testing, RCP)
             interpdat = interpolator(data)
-            if numpy.isnan(interpdat).any():
+            if np.isnan(interpdat).any():
                 print("WARNING: nans found in interpolator! fixing...")
                 interpdat = np.nan_to_num(interpdat,nan=1e10)
 

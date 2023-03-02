@@ -332,11 +332,11 @@ class InversionIterator(object):
         result = scipy.sparse.linalg.lsmr(
             self.sensitivity_matrix,
             self.residuals,
-            damp,
-            atol,
-            btol,
-            conlim,
-            maxiter,
+            damp = damp,
+            atol = atol,
+            btol = btol,
+            conlim = conlim,
+            maxiter = maxiter,
             show=False
         )
         x, istop, itn, normr, normar, norma, conda, normx = result
@@ -614,7 +614,7 @@ class InversionIterator(object):
         voronoi_cells = center + (voronoi_cells - center) / [1, hvr, hvr]
 
         voronoi_cells = sph2xyz(voronoi_cells)
-        tree = scipy.spatial.cKDTree(voronoi_cells)
+        tree = scipy.spatial.KDTree(voronoi_cells)
 
         raypath = center + (raypath - center) / [1, hvr, hvr]
         raypath = sph2xyz(raypath)
@@ -827,7 +827,7 @@ class InversionIterator(object):
             cell_coords = geo2sph(np.hstack([rand_lat,rand_lon,rand_dep]))
             vcells = sph2xyz(cell_coords,(0,0,0))
 
-            tree = scipy.spatial.cKDTree(vcells)
+            tree = scipy.spatial.KDTree(vcells)
             events_geo = geo2sph(events[['latitude','longitude','depth']])
             events_xyz = sph2xyz(events_geo, origin=(0,0,0))
             _, cell_ids = tree.query(events_xyz)
@@ -1043,7 +1043,7 @@ class InversionIterator(object):
             voronoi_cells = center + (voronoi_cells - center) / [1, hvr, hvr]
 
             voronoi_cells = sph2xyz(voronoi_cells)
-            tree = scipy.spatial.cKDTree(voronoi_cells)
+            tree = scipy.spatial.KDTree(voronoi_cells)
 
             nodes = self.pwave_model.nodes
             nodes = center + (nodes - center) / [1, hvr, hvr]
@@ -1412,11 +1412,11 @@ class InversionIterator(object):
                 result = scipy.sparse.linalg.lsmr(
                     Gmatrix,
                     residuals,
-                    damp,
-                    atol,
-                    btol,
-                    conlim,
-                    maxiter,
+                    damp = damp,
+                    atol = atol,
+                    btol = btol,
+                    conlim = conlim,
+                    maxiter = maxiter,
                     show=False
                 )
                 x, istop, itn, normr, normar, norma, conda, normx = result

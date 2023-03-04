@@ -13,12 +13,7 @@ def fibonacci(n):
     """
     Return the n-th number in the Fibonacci sequence.
     """
-    if n == 0:
-        return (1)
-    elif n == 1:
-        return (1)
-    else:
-        return (fibonacci(n - 2)  +  fibonacci(n - 1))
+    return pow(2 << n, n+1, (4 << 2 * n) - (2 << n)-1) % (2 << n)
 
 
 @_utilities.log_errors(logger)
@@ -37,7 +32,7 @@ def _init_centroids(k, points):
     centroids = [xyz[idx]]
 
     for ik in range(k-1):
-        tree = scipy.spatial.cKDTree(centroids)
+        tree = scipy.spatial.KDTree(centroids)
         dist, _ = tree.query(xyz)
         prob = dist / np.sum(dist)
         idx = np.random.choice(idxs, p=prob)
@@ -65,7 +60,7 @@ def k_medians(k, points):
     while True:
 
         _medians = []
-        tree = scipy.spatial.cKDTree(medians)
+        tree = scipy.spatial.KDTree(medians)
         _, indexes = tree.query(xyz)
 
         if np.all(indexes == last_indexes):

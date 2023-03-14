@@ -686,7 +686,10 @@ class InversionIterator(object):
 
             # Remove outliers.
             arrivals = remove_outliers(arrivals, tukey_k, "residual")
-
+            
+            # Remove NaNs.
+            arrivals = arrivals[arrivals['residual'].notnull()]            
+            
             # Sample arrivals.
             narrival = min(len(arrivals), narrival)
             arrivals = arrivals.sample(n=narrival, weights="weight")
@@ -707,10 +710,14 @@ class InversionIterator(object):
 
         if RANK == ROOT_RANK:
             nevent = self.cfg["algorithm"]["nevent"]
+            nevent = min(nevent, len(self.events))
 
             # Sample events.
-            #events = self.events.sample(n=nevent, weights=None)
             events = self.events.sample(n=nevent, weights='weight')
+            
+            # Remove events with NaN residual (!)
+            events = events[events['residual'].notnull()]            
+            
             self.sampled_events = events
 
         self.synchronize(attrs=["sampled_events"])
@@ -791,11 +798,15 @@ class InversionIterator(object):
                         # attempt to catch/skip bad raypaths
                         try:
                             raypath = traveltime.trace_ray(coords)
-                            dataset[:, idx] = raypath.T.copy()
                         except:
                             print("WARNING: trace_ray issue, event_id = ", event_id)
-                            continue
-
+                            event_coords = geo2sph(event[columns])
+                            if np.all(event_coords==coords):
+                                event_coords += np.random.random(3)*0.2 # shift by <200 m? 
+                            raypath = np.array([coords,event_coords])              
+                        
+                        dataset[:, idx] = raypath.T.copy()
+                        
                     raypath_file.close()
 
         COMM.barrier()

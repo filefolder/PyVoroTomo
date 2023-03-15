@@ -788,14 +788,9 @@ class InversionIterator(object):
                         coords = event[columns]
                         coords = geo2sph(coords)
                         
-                        # attempt to catch/skip bad raypaths
-                        try:
-                            raypath = traveltime.trace_ray(coords)
-                            dataset[:, idx] = raypath.T.copy()
-                        except:
-                            print("WARNING: trace_ray issue, event_id = ", event_id)
-                            continue
-
+                        raypath = traveltime.trace_ray(coords)
+                        dataset[:, idx] = raypath.T.copy()
+                        
                     raypath_file.close()
 
         COMM.barrier()
@@ -917,9 +912,9 @@ class InversionIterator(object):
                 interpdat = np.nan_to_num(interpdat,nan=1e10)
             
             # Assign weights to the arrivals.
-            if self.iiter<2:
+            if self.iiter<6:
                 events["weight"] = 1.0 / interpdat
-            elif 2<=self.iiter<4:
+            elif 6<=self.iiter<10:
                 events["weight"] = 1.0 / np.exp(interpdat)
             else:
                 events["weight"] = 1.0
@@ -929,7 +924,6 @@ class InversionIterator(object):
         self.synchronize(attrs=["events"])
 
         return (True)
-
 
 
     @_utilities.log_errors(logger)
@@ -1031,7 +1025,7 @@ class InversionIterator(object):
                 interpdat = np.nan_to_num(interpdat,nan=1e10)
 
             # Assign weights to the arrivals.
-            dataweight = 1 / np.exp(interpdat)
+            dataweight = 1 / interpdat # np.exp(interpdat)
             #arrivals["weight"] = dataweight
             # revise this latter, remove data with distance large than 150km
             # let user set the max_dist for phase cutoff
@@ -1126,7 +1120,6 @@ class InversionIterator(object):
 
                 if item is None:
                     logger.debug("Received sentinel.")
-
                     break
 
                 network, station = item
@@ -1405,7 +1398,7 @@ class InversionIterator(object):
                             event_coords = geo2sph(event_coords)
                             vel_hypo = model.value(event_coords)
                             dtdx = np.zeros(4,)
-                            dtdx[:-1] = dpos/vel_hypo
+                            dtdx[:-1] = dpos/vel_hypo # may be causing issue near ocean water boundaries
                             dtdx[-1] = 1.0
                             _column_idxs = np.arange(idx*4,idx*4+4)
                             _nonnzero_values = dtdx
@@ -1428,7 +1421,6 @@ class InversionIterator(object):
                     (nonzero_values, (row_idxs, column_idxs)),
                     shape=(len(nsegments), ncol)
                 )
-
 
                 # call lsmr for relocating
                 # add three more parameters into cfg file,
@@ -1534,7 +1526,6 @@ class InversionIterator(object):
                     if event_id is None:
                         logger.debug("Received sentinel, gathering events.")
                         COMM.gather(relocated_events, root=ROOT_RANK)
-
                         break
 
                     logger.debug(f"Received event ID #{event_id}")
@@ -1569,7 +1560,6 @@ class InversionIterator(object):
         self.synchronize(attrs=["events"])
 
         return (True)
-
 
 
     @_utilities.log_errors(logger)
@@ -1629,7 +1619,6 @@ class InversionIterator(object):
                     f"without associated events."
                 )
 
-
             # Drop stations without arrivals.
             n0 = len(self.stations)
             arrivals = self.arrivals.set_index(["network", "station"])
@@ -1659,7 +1648,6 @@ class InversionIterator(object):
                     f"Dropped {dn} arrival{'s' if dn > 1 else ''} without "
                     f"associated stations."
                 )
-
 
 
         self.synchronize(attrs=["stations"])
@@ -1812,9 +1800,7 @@ class InversionIterator(object):
                     if item is None:
                         logger.debug("Received sentinel. Gathering arrivals.")
                         COMM.gather(updated_arrivals, root=ROOT_RANK)
-
                         break
-
 
                     network, station, phase = item
                     handle = "/".join([network, station, phase])
@@ -1879,7 +1865,6 @@ class InversionIterator(object):
         return (True)
 
 
-
 @_utilities.log_errors(logger)
 def arrival_dict(dataframe, event_id):
     """
@@ -1917,7 +1902,6 @@ def remove_outliers(dataframe, tukey_k, column):
     ]
 
     return (dataframe)
-
 
 @_utilities.log_errors(logger)
 def station_dict(dataframe):

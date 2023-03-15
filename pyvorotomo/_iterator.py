@@ -893,9 +893,8 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
-            data_range += 1e-10
-            #if data_range == 0:
-            #    data_range = 1e-9 # failsafe (RCP)
+            if data_range == 0:
+                data_range = 1e-9 # failsafe (RCP)
             data_delta = data - data_min
             data = data_delta / data_range
 
@@ -1009,10 +1008,8 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
-            data_range += 1e-10
-            #if not data_range.all():
-                #data_range[data_range==0] = 1e-10
-                #data_range = 1e-10 # failsafe
+            if data_range == 0:
+                data_range = 1e-10 # failsafe
             data_delta = data - data_min
             data = data_delta / data_range
 

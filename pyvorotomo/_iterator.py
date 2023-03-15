@@ -588,7 +588,7 @@ class InversionIterator(object):
                     points = np.vstack([points, _points])
 
                 idxs = np.arange(len(points))
-                idxs = np.random.choice(idxs, k_medians_npts, replace=False)
+                idxs = np.random.choice(idxs, k_medians_npts, replace=True) # safer if True
                 points = points[idxs]
 
                 medians = _clustering.k_medians(kvoronoi, points)

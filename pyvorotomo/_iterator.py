@@ -1645,6 +1645,65 @@ class InversionIterator(object):
                     f"associated stations."
                 )
 
+            # Drop arrivals out of desired range (NEW!)
+            arrivals = self.arrivals
+
+            max_dist = self.cfg["algorithm"]["max_dist"]
+            min_dist = self.cfg["algorithm"]["min_dist"]
+            
+            # Merge event data.
+            events = self.events.rename(
+                columns={
+                    "latitude": "event_latitude",
+                    "longitude": "event_longitude",
+                    "depth": "event_depth"
+                }
+            )
+
+            merge_columns = [
+                "event_latitude",
+                "event_longitude",
+                "event_depth",
+                "event_id"
+            ]
+
+            arrivals = arrivals.merge(events[merge_columns], on="event_id")
+
+            # Merge station data.
+            stations = self.stations.rename(
+                columns={
+                    "latitude": "station_latitude",
+                    "longitude": "station_longitude"
+                }
+            )
+
+            merge_columns = [
+                "station_latitude",
+                "station_longitude",
+                "network",
+                "station"
+            ]
+            merge_keys = ["network", "station"]
+            arrivals = arrivals.merge(stations[merge_columns], on=merge_keys)
+
+            # Compute station-to-event azimuth and epicentral distance.
+            dlat = arrivals["event_latitude"] - arrivals["station_latitude"]
+            dlon = arrivals["event_longitude"] - arrivals["station_longitude"]
+            arrivals["azimuth"] = np.arctan2(dlat, dlon)
+            arrivals["delta"] = np.sqrt(dlat ** 2  +  dlon ** 2) #need a better equation than this TODO
+            
+            idx_keep = arrivals[(arrivals['delta']>=min_dist) & (arrivals['delta']<=max_dist*1.5)].index
+            
+            n0 = len(self.arrivals)
+            arrivals = arrivals.loc[idx_keep]
+            arrivals = arrivals.reset_index()
+            self.arrivals = arrivals
+            dn = n0 - len(self.arrivals)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} arrivals outside of requested range."
+                )               
+
 
         self.synchronize(attrs=["stations"])
 

@@ -1618,37 +1618,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(
                     f"Dropped {dn} arrival{'s' if dn > 1 else ''} "
-                    f"without associated events."
-                )
-
-            # Drop stations without arrivals.
-            n0 = len(self.stations)
-            arrivals = self.arrivals.set_index(["network", "station"])
-            idx_keep = arrivals.index.unique()
-            stations = self.stations.set_index(["network", "station"])
-            stations = stations.loc[idx_keep]
-            stations = stations.reset_index()
-            self.stations = stations
-            dn = n0 - len(self.stations)
-            if dn > 0:
-                logger.info(
-                    f"Dropped {dn} station{'s' if dn > 1 else ''} without "
-                    f"associated arrivals. {n0} remain."
-                )
-
-            # Drop arrivals without stations.
-            n0 = len(self.arrivals)
-            stations = self.stations.set_index(["network", "station"])
-            idx_keep = stations.index.unique()
-            arrivals = self.arrivals.set_index(["network", "station"])
-            arrivals = arrivals.loc[idx_keep]
-            arrivals = arrivals.reset_index()
-            self.arrivals = arrivals
-            dn = n0 - len(self.arrivals)
-            if dn > 0:
-                logger.info(
-                    f"Dropped {dn} arrival{'s' if dn > 1 else ''} without "
-                    f"associated stations. {n0} remain."
+                    f"without associated events. {n0} remain."
                 )
 
             # Drop arrivals out of desired range (NEW!)
@@ -1701,13 +1671,41 @@ class InversionIterator(object):
             idx_keep = arrivals[(arrivals['delta']>=min_dist) & (arrivals['delta']<=max_dist*1.5)].index
             
             n0 = len(self.arrivals)
+            self.arrivals = arrivals.loc[idx_keep]
+            dn = n0 - len(self.arrivals)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} arrivals outside of requested range. {n0} remain."
+                )
+                
+            # Drop stations without arrivals.
+            n0 = len(self.stations)
+            arrivals = self.arrivals.set_index(["network", "station"])
+            idx_keep = arrivals.index.unique()
+            stations = self.stations.set_index(["network", "station"])
+            stations = stations.loc[idx_keep]
+            stations = stations.reset_index()
+            self.stations = stations
+            dn = n0 - len(self.stations)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} station{'s' if dn > 1 else ''} without "
+                    f"associated arrivals. {n0} remain."
+                )
+
+            # Drop arrivals without stations.
+            n0 = len(self.arrivals)
+            stations = self.stations.set_index(["network", "station"])
+            idx_keep = stations.index.unique()
+            arrivals = self.arrivals.set_index(["network", "station"])
             arrivals = arrivals.loc[idx_keep]
             arrivals = arrivals.reset_index()
             self.arrivals = arrivals
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} arrivals outside of requested range. {n0} remain"
+                    f"Dropped {dn} arrival{'s' if dn > 1 else ''} without "
+                    f"associated stations. {n0} remain."
                 )
 
         self.synchronize(attrs=["stations"])

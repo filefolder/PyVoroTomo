@@ -1582,7 +1582,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(
                     f"Dropped {dn} event{'s' if dn > 1 else ''} duplicate "
-                    f"stations."
+                    f"stations. {n0} remain."
                 )
 
             # Drop duplicate arrivals.
@@ -1593,7 +1593,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(
                     f"Dropped {dn} event{'s' if dn > 1 else ''} duplicate "
-                    f"arrivals."
+                    f"arrivals. {n0} remain."
                 )
 
             # Drop events without minimum number of arrivals
@@ -1607,7 +1607,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(
                     f"Dropped {dn} event{'s' if dn > 1 else ''} with < "
-                    f"{min_narrival} arrivals."
+                    f"{min_narrival} arrivals. {n0} remain."
                 )
 
             # Drop arrivals without events.
@@ -1633,7 +1633,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(
                     f"Dropped {dn} station{'s' if dn > 1 else ''} without "
-                    f"associated arrivals."
+                    f"associated arrivals. {n0} remain."
                 )
 
             # Drop arrivals without stations.
@@ -1648,7 +1648,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(
                     f"Dropped {dn} arrival{'s' if dn > 1 else ''} without "
-                    f"associated stations."
+                    f"associated stations. {n0} remain."
                 )
 
             # Drop arrivals out of desired range (NEW!)
@@ -1707,13 +1707,8 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} arrivals outside of requested range."
-                )               
-
-            # Update us about what's left
-            logger.info(f"Stations remaining: {len(self.stations)}"})
-            logger.info(f"Events remaining: {len(self.events)}"})
-            logger.info(f"Arrivals remaining: {len(self.arrivals)}")
+                    f"Dropped {dn} arrivals outside of requested range. {n0} remain"
+                )
 
         self.synchronize(attrs=["stations"])
 

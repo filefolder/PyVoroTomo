@@ -707,7 +707,13 @@ class InversionIterator(object):
 
         if RANK == ROOT_RANK:
             nevent = self.cfg["algorithm"]["nevent"]
-
+            
+            # Remove events with NaN residual (!)
+            events = events[events['residual'].notnull()]
+            
+            # Limit maximum requested
+            nevent = min(nevent, len(events))
+            
             # Sample events.
             #events = self.events.sample(n=nevent, weights=None)
             events = self.events.sample(n=nevent, weights='weight')

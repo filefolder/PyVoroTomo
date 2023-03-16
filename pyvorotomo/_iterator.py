@@ -1183,17 +1183,22 @@ class InversionIterator(object):
         alpha = self.cfg["algorithm"]["paretos_alpha"]
         nreal = self.cfg["algorithm"]["nreal"]
         relocation_method = self.cfg["relocate"]["method"]
+        max_dist = self.cfg["algorithm"]["max_dist"]
+        min_dist = self.cfg["algorithm"]["min_dist"]
+        #phase_order = self.cfg["algorithm"]["phase_order"]       
 
         self.iiter += 1
+        
+        phase_order = ['P', 'S'] # TODO allow changes
 
         logger.info(f"Iteration #{self.iiter} (/{niter}).")
 
-        for phase in self.phases:
+        for phase in phase_order:
             self._update_arrival_weights(phase)
             self._update_events_weights()
         for hvr in hvrs:
             self._reset_realization_stack(phase)
-            for phase in self.phases:
+            for phase in phase_order:
                 logger.info(f"Updating {phase}-wave model")
                 for self.ireal in range(nreal):
                     logger.info(

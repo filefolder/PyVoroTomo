@@ -33,6 +33,31 @@ RANK       = COMM.Get_rank()
 WORLD_SIZE = COMM.Get_size()
 ROOT_RANK  = _constants.ROOT_RANK
 
+def dist_on_unit_sphere(lat1, lon1, lat2, lon2):
+    # Convert latitude and longitude from decimal degrees to radians
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    theta1 = np.radians(lon1)
+    theta2 = np.radians(lon2)
+
+    # Calculate the spherical distance from the law of cosines
+    dtheta = theta2 - theta1
+    delta_phi = phi2 - phi1
+    a = np.sin(delta_phi/2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dtheta/2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return np.degrees(c)
+
+def dist_km(lat1, lon1, lat2, lon2):
+    # Convert latitude and longitude from decimal degrees to radians
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    delta_phi = np.radians(lat2 - lat1)
+    delta_lon = np.radians(lon2 - lon1)
+
+    # Calculate the spherical distance using the Haversine formula
+    a = np.sin(delta_phi/2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(delta_lon/2)**2
+    distance = 6371 * 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return distance
 
 class InversionIterator(object):
     """
@@ -1614,25 +1639,13 @@ class InversionIterator(object):
                     f"Dropped {dn} event{'s' if dn > 1 else ''} with < "
                     f"{min_narrival} arrivals. {n0} remain."
                 )
-
-            # Drop arrivals without events.
-            n0 = len(self.arrivals)
-            bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])
-            self.arrivals = self.arrivals[bool_idx]
-            dn = n0 - len(self.arrivals)
-            if dn > 0:
-                logger.info(
-                    f"Dropped {dn} arrival{'s' if dn > 1 else ''} "
-                    f"without associated events. {n0} remain."
-                )
-
-            # Drop arrivals out of desired range (NEW!)
+            # Drop arrivals out of desired distance range (NEW!)
             arrivals = self.arrivals
 
             max_dist = self.cfg["algorithm"]["max_dist"]
             min_dist = self.cfg["algorithm"]["min_dist"]
             
-            # Merge event data.
+            #      Merge event data.
             events = self.events.rename(
                 columns={
                     "latitude": "event_latitude",
@@ -1650,7 +1663,7 @@ class InversionIterator(object):
 
             arrivals = arrivals.merge(events[merge_columns], on="event_id")
 
-            # Merge station data.
+            #      Merge station data.
             stations = self.stations.rename(
                 columns={
                     "latitude": "station_latitude",
@@ -1667,11 +1680,15 @@ class InversionIterator(object):
             merge_keys = ["network", "station"]
             arrivals = arrivals.merge(stations[merge_columns], on=merge_keys)
 
-            # Compute station-to-event azimuth and epicentral distance.
-            dlat = arrivals["event_latitude"] - arrivals["station_latitude"]
-            dlon = arrivals["event_longitude"] - arrivals["station_longitude"]
-            arrivals["azimuth"] = np.arctan2(dlat, dlon)
-            arrivals["delta"] = np.sqrt(dlat ** 2  +  dlon ** 2) #need a better equation than this TODO
+            #      Compute station-to-event azimuth and epicentral distance.
+            #dlat = arrivals["event_latitude"] - arrivals["station_latitude"]
+            #dlon = arrivals["event_longitude"] - arrivals["station_longitude"]
+            #arrivals["azimuth"] = np.arctan2(dlat, dlon)
+            #arrivals["delta"] = np.sqrt(dlat ** 2  +  dlon ** 2)
+            
+            dist = dist_on_unit_sphere(arrivals["event_latitude"],arrivals["event_longitude"],
+                                   arrivals["station_latitude"],arrivals["station_longitude"])
+            arrivals["delta"] = dist
             
             idx_keep = arrivals[(arrivals['delta']>=min_dist) & (arrivals['delta']<=max_dist*1.5)].index
             
@@ -1681,6 +1698,28 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(
                     f"Dropped {dn} arrivals outside of requested range. {n0} remain."
+                )
+
+            # Drop arrivals without events.
+            n0 = len(self.arrivals)
+            bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])
+            self.arrivals = self.arrivals[bool_idx]
+            dn = n0 - len(self.arrivals)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} arrival{'s' if dn > 1 else ''} "
+                    f"without associated events. {n0} remain."
+                )
+
+            # Drop events without arrivals (NEW)
+            n0 = len(self.events)
+            bool_idx = self.events["event_id"].isin(self.arrivals["event_id"])
+            self.events = self.events[bool_idx]
+            dn = n0 - len(self.events)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} event{'s' if dn > 1 else ''} "
+                    f"without associated arrivals. {n0} remain."
                 )
                 
             # Drop stations without arrivals.

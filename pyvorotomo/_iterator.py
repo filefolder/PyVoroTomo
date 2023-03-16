@@ -1711,9 +1711,9 @@ class InversionIterator(object):
                 )               
 
             # Update us about what's left
-            logger.info(f"Stations remaining: {len(self.stations)}"}
-            logger.info(f"Events remaining: {len(self.events)}"}
-            logger.info(f"Arrivals remaining: {len(self.arrivals)}"}
+            logger.info(f"Stations remaining: {len(self.stations)}"})
+            logger.info(f"Events remaining: {len(self.events)}"})
+            logger.info(f"Arrivals remaining: {len(self.arrivals)}")
 
         self.synchronize(attrs=["stations"])
 

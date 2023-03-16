@@ -709,14 +709,14 @@ class InversionIterator(object):
             nevent = self.cfg["algorithm"]["nevent"]
             
             # Remove events with NaN residual (!)
-            events = events[events['residual'].notnull()]
+            events = self.events[self.events['residual'].notnull()]
             
             # Limit maximum requested
             nevent = min(nevent, len(events))
             
             # Sample events.
             #events = self.events.sample(n=nevent, weights=None)
-            events = self.events.sample(n=nevent, weights='weight')
+            events = events.sample(n=nevent, weights='weight')
             self.sampled_events = events
 
         self.synchronize(attrs=["sampled_events"])
@@ -1710,6 +1710,10 @@ class InversionIterator(object):
                     f"Dropped {dn} arrivals outside of requested range."
                 )               
 
+            # Update us about what's left
+            logger.info(f"Stations remaining: {len(self.stations)}"}
+            logger.info(f"Events remaining: {len(self.events)}"}
+            logger.info(f"Arrivals remaining: {len(self.arrivals)}"}
 
         self.synchronize(attrs=["stations"])
 

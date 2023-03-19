@@ -1014,8 +1014,12 @@ class InversionIterator(object):
             dlat = arrivals["event_latitude"] - arrivals["station_latitude"]
             dlon = arrivals["event_longitude"] - arrivals["station_longitude"]
             arrivals["azimuth"] = np.arctan2(dlat, dlon)
-            arrivals["delta"] = np.sqrt(dlat ** 2  +  dlon ** 2)
-
+            #arrivals["delta"] = np.sqrt(dlat ** 2  +  dlon ** 2)
+            arrivals["delta"] = dist_on_unit_sphere(arrivals["event_latitude"],
+                                                    arrivals["event_longitude"],
+                                                    arrivals["station_latitude"],
+                                                    arrivals["station_longitude"])
+            
             # Extract the data for KDE fitting.
             kde_columns = [
                 "event_latitude",

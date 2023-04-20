@@ -1614,14 +1614,13 @@ class InversionIterator(object):
         if RANK == ROOT_RANK:
 
             # Drop duplicate stations.
-            keys = ["network", "station"]
+            keys = ["network", "station", "starttime"]
             n0 = len(self.stations)
             self.stations = self.stations.drop_duplicates(keys)
             dn = n0 - len(self.stations)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} event{'s' if dn > 1 else ''} duplicate "
-                    f"stations. {n0} remain."
+                    f"Dropped {dn} duplicate stations {n0} remain."
                 )
 
             # Drop duplicate arrivals.
@@ -1631,8 +1630,17 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} event{'s' if dn > 1 else ''} duplicate "
-                    f"arrivals. {n0} remain."
+                    f"Dropped {dn} duplicate arrivals {n0} remain."
+                )
+                
+            # Drop duplicate events.
+            keys = ["latitude", "longitude", "depth", "time"]
+            n0 = len(self.events)
+            self.events = self.events.drop_duplicates(keys)
+            dn = n0 - len(self.events)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} duplicate events {n0} remain."
                 )
 
             # Drop events without minimum number of arrivals
@@ -1645,16 +1653,15 @@ class InversionIterator(object):
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} event{'s' if dn > 1 else ''} with < "
-                    f"{min_narrival} arrivals. {n0} remain."
+                    f"Dropped {dn} events with < {min_narrival} arrivals. {n0} remain."
                 )
+                
             # Drop arrivals out of desired distance range (NEW!)
             arrivals = self.arrivals
-
             max_dist = self.cfg["algorithm"]["max_dist"]
             min_dist = self.cfg["algorithm"]["min_dist"]
             
-            #      Merge event data.
+            # Merge event data.
             events = self.events.rename(
                 columns={
                     "latitude": "event_latitude",
@@ -1672,7 +1679,7 @@ class InversionIterator(object):
 
             arrivals = arrivals.merge(events[merge_columns], on="event_id")
 
-            #      Merge station data.
+            # Merge station data.
             stations = self.stations.rename(
                 columns={
                     "latitude": "station_latitude",
@@ -1689,7 +1696,7 @@ class InversionIterator(object):
             merge_keys = ["network", "station"]
             arrivals = arrivals.merge(stations[merge_columns], on=merge_keys)
 
-            #      Compute station-to-event azimuth and epicentral distance.
+            # Compute station-to-event azimuth and epicentral distance.
             #dlat = arrivals["event_latitude"] - arrivals["station_latitude"]
             #dlon = arrivals["event_longitude"] - arrivals["station_longitude"]
             #arrivals["azimuth"] = np.arctan2(dlat, dlon)
@@ -1716,8 +1723,7 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} arrival{'s' if dn > 1 else ''} "
-                    f"without associated events. {n0} remain."
+                    f"Dropped {dn} arrivals without associated events. {n0} remain."
                 )
 
             # Drop events without arrivals (NEW)
@@ -1727,8 +1733,7 @@ class InversionIterator(object):
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} event{'s' if dn > 1 else ''} "
-                    f"without associated arrivals. {n0} remain."
+                    f"Dropped {dn} events without associated arrivals. {n0} remain."
                 )
                 
             # Drop stations without arrivals.
@@ -1738,12 +1743,12 @@ class InversionIterator(object):
             stations = self.stations.set_index(["network", "station"])
             stations = stations.loc[idx_keep]
             stations = stations.reset_index()
+            arrivals = arrivals.reset_index()
             self.stations = stations
             dn = n0 - len(self.stations)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} station{'s' if dn > 1 else ''} without "
-                    f"associated arrivals. {n0} remain."
+                    f"Dropped {dn} stations without associated arrivals. {n0} remain."
                 )
 
             # Drop arrivals without stations.
@@ -1757,8 +1762,7 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} arrival{'s' if dn > 1 else ''} without "
-                    f"associated stations. {n0} remain."
+                    f"Dropped {dn} arrivals without associated stations. {n0} remain."
                 )
 
         self.synchronize(attrs=["stations"])

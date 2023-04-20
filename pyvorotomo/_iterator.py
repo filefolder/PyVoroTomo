@@ -1994,11 +1994,24 @@ def arrival_dict(dataframe, event_id):
     dataframe = dataframe.set_index("event_id")
     fields = ["network", "station", "phase", "time"]
     dataframe = dataframe.loc[event_id, fields]
-
-    _arrival_dict = {
-        (network, station, phase): timestamp
-        for network, station, phase, timestamp in dataframe.values
-    }
+    
+    #failsafe against weirdness or if stations have their start/end times set incorrectly
+    #need to revisit first <=1 part, unclear if that ever happens normally
+    if len(dataframe) <= 1:
+        _arrival_dict = {} if len(dataframe) == 0 else {
+	    (dataframe.iloc[0, 0], dataframe.iloc[0, 1],
+         dataframe.iloc[0, 2]): dataframe.iloc[0, 3]
+        }
+    else:
+        try:
+            _arrival_dict = {
+                (network, station, phase): timestamp
+                for network, station, phase, timestamp in dataframe.values
+            }
+        except:
+            print("issue with setting arrival dict event_id=", event_id)
+            print(dataframe.values)
+            _arrival_dict = {}
 
     return (_arrival_dict)
 

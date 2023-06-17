@@ -57,6 +57,7 @@ def k_medians(k, points):
 
     last_indexes = None
 
+    tick = 0
     while True:
 
         _medians = []
@@ -65,6 +66,11 @@ def k_medians(k, points):
 
         if np.all(indexes == last_indexes):
             break
+        
+        #infinite loop failsafe (wild guess for max ticks..they seem to normally top out in the 100's)
+        if tick > 10000:
+            break
+        tick += 1          
 
         last_indexes = indexes
 

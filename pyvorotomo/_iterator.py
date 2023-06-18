@@ -1614,7 +1614,7 @@ class InversionIterator(object):
         if RANK == ROOT_RANK:
 
             # Drop duplicate stations.
-            keys = ["network", "station", "starttime"]
+            keys = ["network", "station"]
             n0 = len(self.stations)
             self.stations = self.stations.drop_duplicates(keys)
             dn = n0 - len(self.stations)

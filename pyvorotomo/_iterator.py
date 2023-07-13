@@ -1640,7 +1640,7 @@ class InversionIterator(object):
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} duplicate events {n0} remain."
+                    f"Dropped {dn} duplicate events {n0-dn} remain."
                 )
 
             # Drop events without minimum number of arrivals

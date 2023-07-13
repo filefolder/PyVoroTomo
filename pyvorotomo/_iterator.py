@@ -1748,7 +1748,7 @@ class InversionIterator(object):
             dn = n0 - len(self.stations)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} stations without associated arrivals. {n0} remain."
+                    f"Dropped {dn} stations without associated arrivals. {n0-dn} remain."
                 )
 
             # Drop arrivals without stations.

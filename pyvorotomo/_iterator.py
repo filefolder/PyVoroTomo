@@ -1713,7 +1713,7 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} arrivals outside of requested range. {n0} remain."
+                    f"Dropped {dn} arrivals outside of requested range. {n0-dn} remain."
                 )
 
             # Drop arrivals without events.
@@ -1723,7 +1723,7 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} arrivals without associated events. {n0} remain."
+                    f"Dropped {dn} arrivals without associated events. {n0-dn} remain."
                 )
 
             # Drop events without arrivals (NEW)
@@ -1733,7 +1733,7 @@ class InversionIterator(object):
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} events without associated arrivals. {n0} remain."
+                    f"Dropped {dn} events without associated arrivals. {n0-dn} remain."
                 )
                 
             # Drop stations without arrivals.

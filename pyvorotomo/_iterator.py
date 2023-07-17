@@ -1696,6 +1696,22 @@ class InversionIterator(object):
             merge_keys = ["network", "station"]
             arrivals = arrivals.merge(stations[merge_columns], on=merge_keys)
 
+            # Drop events outside of requested regional range
+            dist = dist_on_unit_sphere(arrivals["event_latitude"],arrivals["event_longitude"],
+                                   arrivals["station_latitude"],arrivals["station_longitude"])
+            arrivals["delta"] = dist
+            
+            idx_keep = arrivals[(arrivals['delta']>=min_dist)
+		              & (arrivals['delta']<=max_dist*1.5)].index
+            
+            n0 = len(self.arrivals)
+            self.arrivals = arrivals.loc[idx_keep]
+            dn = n0 - len(self.arrivals)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} arrivals outside of requested lateral range. {n0-dn} remain."
+                )
+
             # Drop events outside of the velocity model
             velmodel = self.pwave_model
             minlat,maxlon,mindepth = sph2geo(velmodel.max_coords) #pretty confusing
@@ -1732,22 +1748,7 @@ class InversionIterator(object):
                 logger.info(
                     f"Dropped {dn} events without associated arrivals. {n0-dn} remain."
                 )
-
-            # Drop events outside of requested regional range
-            dist = dist_on_unit_sphere(arrivals["event_latitude"],arrivals["event_longitude"],
-                                   arrivals["station_latitude"],arrivals["station_longitude"])
-            arrivals["delta"] = dist
-            
-            idx_keep = arrivals[(arrivals['delta']>=min_dist) & (arrivals['delta']<=max_dist*1.5)].index
-            
-            n0 = len(self.arrivals)
-            self.arrivals = arrivals.loc[idx_keep]
-            dn = n0 - len(self.arrivals)
-            if dn > 0:
-                logger.info(
-                    f"Dropped {dn} arrivals outside of requested lateral range. {n0-dn} remain."
-                )
-
+		
             # Drop arrivals without events
             n0 = len(self.arrivals)
             bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])

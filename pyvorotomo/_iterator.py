@@ -1696,12 +1696,44 @@ class InversionIterator(object):
             merge_keys = ["network", "station"]
             arrivals = arrivals.merge(stations[merge_columns], on=merge_keys)
 
-            # Compute station-to-event azimuth and epicentral distance.
-            #dlat = arrivals["event_latitude"] - arrivals["station_latitude"]
-            #dlon = arrivals["event_longitude"] - arrivals["station_longitude"]
-            #arrivals["azimuth"] = np.arctan2(dlat, dlon)
-            #arrivals["delta"] = np.sqrt(dlat ** 2  +  dlon ** 2)
-            
+            # Drop events outside of the velocity model
+            velmodel = self.pwave_model
+            minlat,maxlon,mindepth = sph2geo(velmodel.max_coords) #pretty confusing
+            maxlat,minlon,maxdepth = sph2geo(velmodel.min_coords)
+            events = self.events            
+            n0 = len(self.events)
+            idx_keep = events[ (minlon <= events['longitude']) 
+                             & (events['longitude']<= maxlon)
+                             & (minlat <= events['latitude']) 
+                             & (events['latitude']<= maxlat)].index
+            self.events = events.loc[idx_keep]
+            dn = n0 - len(self.events)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} events outside of velocity model. {n0-dn} remain."
+                )
+
+            # Drop arrivals without events
+            n0 = len(self.arrivals)
+            bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])
+            self.arrivals = self.arrivals[bool_idx]
+            dn = n0 - len(self.arrivals)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} arrivals without associated events. {n0-dn} remain."
+                )
+
+            # Drop events without arrivals
+            n0 = len(self.events)
+            bool_idx = self.events["event_id"].isin(self.arrivals["event_id"])
+            self.events = self.events[bool_idx]
+            dn = n0 - len(self.events)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} events without associated arrivals. {n0-dn} remain."
+                )
+
+            # Drop events outside of requested regional range
             dist = dist_on_unit_sphere(arrivals["event_latitude"],arrivals["event_longitude"],
                                    arrivals["station_latitude"],arrivals["station_longitude"])
             arrivals["delta"] = dist
@@ -1713,10 +1745,10 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} arrivals outside of requested range. {n0-dn} remain."
+                    f"Dropped {dn} arrivals outside of requested lateral range. {n0-dn} remain."
                 )
 
-            # Drop arrivals without events.
+            # Drop arrivals without events
             n0 = len(self.arrivals)
             bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])
             self.arrivals = self.arrivals[bool_idx]

@@ -448,7 +448,6 @@ class InversionIterator(object):
 
         else:
 
-
             nvoronoi = len(self.voronoi_cells)
             column_idxs = np.array([], dtype=_constants.DTYPE_INT)
             nsegments = np.array([], dtype=_constants.DTYPE_INT)
@@ -613,7 +612,7 @@ class InversionIterator(object):
                     points = np.vstack([points, _points])
 
                 idxs = np.arange(len(points))
-                idxs = np.random.choice(idxs, k_medians_npts, replace=False)
+	        idxs = np.random.choice(idxs, min(len(idxs),k_medians_npts), replace=False)
                 points = points[idxs]
 
                 medians = _clustering.k_medians(kvoronoi, points)

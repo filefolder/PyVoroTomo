@@ -842,7 +842,7 @@ class InversionIterator(object):
         Update arrival weights using KDE.
         """
 
-        logger.info("Updating weights for homogeneous raypath sampling.")
+        logger.info("Updating arrival weights (random) for homogeneous raypath sampling.")
 
         if RANK == ROOT_RANK:
             arrivals = self.arrivals
@@ -903,7 +903,7 @@ class InversionIterator(object):
         Update events weights using KDE.
         """
 
-        logger.info("Updating weights for homogeneous raypath sampling.")
+        logger.info("Updating events weights for homogeneous raypath sampling.")
 
         if RANK == ROOT_RANK:
 
@@ -926,6 +926,11 @@ class InversionIterator(object):
             data_delta = data - data_min
             data = data_delta / data_range
 
+            #set bandwidth dynamically (NEW!)
+            n, d = data.shape
+            sigma = np.std(data, ddof=1)
+            bandwidth = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma
+		
             # Fit and evaluate the KDE.
             kde = kp.FFTKDE(bw=bandwidth).fit(data)
             points, values = kde.evaluate(npts)
@@ -970,7 +975,7 @@ class InversionIterator(object):
         Update arrival weights using KDE.
         """
 
-        logger.info("Updating weights for homogeneous raypath sampling.")
+        logger.info("Updating arrival weights for homogeneous raypath sampling.")
 
         if RANK == ROOT_RANK:
             arrivals = self.arrivals
@@ -1041,9 +1046,14 @@ class InversionIterator(object):
             data_range = data_max - data_min
             data_delta = data - data_min
             data = data_delta / data_range
+            
+            #set bandwidth dynamically (NEW!)
+            n, d = data.shape
+            sigma = np.std(data, ddof=1)
+            bandwidth = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma
 
             # Fit and evaluate the KDE.
-            kde = kp.FFTKDE(bw=bandwidth).fit(data)
+            kde = kp.FFTKDE(bw=bandwidth).fit(data) #may want to try 'epa' kernel here which is finite
             points, values = kde.evaluate(npts)
             points = [np.unique(points[:,iax]) for iax in range(ndim)]
             values = values.reshape((npts,) * ndim)
@@ -1701,7 +1711,7 @@ class InversionIterator(object):
             arrivals["delta"] = dist
             
             idx_keep = arrivals[(arrivals['delta']>=min_dist)
-		              & (arrivals['delta']<=max_dist*1.5)].index
+		              & (arrivals['delta']<=max_dist)].index
             
             n0 = len(self.arrivals)
             self.arrivals = arrivals.loc[idx_keep]

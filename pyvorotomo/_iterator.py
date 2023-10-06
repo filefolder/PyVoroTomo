@@ -923,6 +923,7 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
+	    if data_range == 0: data_range = 1e-10 #failsafe		
             data_delta = data - data_min
             data = data_delta / data_range
 
@@ -930,9 +931,6 @@ class InversionIterator(object):
             n, d = data.shape
             sigma = np.std(data, ddof=1)
             bandwidth = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma
-            if np.isnan(bandwidth):
-                print("bandwidth was NaN...!? setting to default 0.1")
-                bandwidth = 0.1
 		
             # Fit and evaluate the KDE.
             kde = kp.FFTKDE(bw=bandwidth).fit(data)
@@ -1047,6 +1045,7 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
+	    if data_range == 0: data_range = 1e-10		
             data_delta = data - data_min
             data = data_delta / data_range
             
@@ -1054,9 +1053,6 @@ class InversionIterator(object):
             n, d = data.shape
             sigma = np.std(data, ddof=1)
             bandwidth = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma
-            if np.isnan(bandwidth):
-                print("bandwidth was NaN...!? setting to default 0.1")
-                bandwidth = 0.1
 
             # Fit and evaluate the KDE.
             kde = kp.FFTKDE(bw=bandwidth).fit(data) #may want to try 'epa' kernel here which is finite

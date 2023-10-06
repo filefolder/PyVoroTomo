@@ -922,10 +922,13 @@ class InversionIterator(object):
             # Normalize the data.
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
-            data_range = data_max - data_min
-	    if data_range == 0: data_range = 1e-10 #failsafe		
+            data_range = data_max - data_min	
             data_delta = data - data_min
             data = data_delta / data_range
+
+	    #failsafe for bad data
+	    if np.any(np.isnan(data)):
+                data = np.nan_to_num(data,1e10)
 
             #set bandwidth dynamically (NEW!)
             n, d = data.shape
@@ -1044,10 +1047,13 @@ class InversionIterator(object):
             # Normalize the data.
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
-            data_range = data_max - data_min
-	    if data_range == 0: data_range = 1e-10		
+            data_range = data_max - data_min	
             data_delta = data - data_min
             data = data_delta / data_range
+
+	    #failsafe for bad data
+	    if np.any(np.isnan(data)):
+                data = np.nan_to_num(data,1e10)
             
             #set bandwidth dynamically (NEW!)
             n, d = data.shape

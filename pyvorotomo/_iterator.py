@@ -930,6 +930,9 @@ class InversionIterator(object):
             n, d = data.shape
             sigma = np.std(data, ddof=1)
             bandwidth = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma
+            if np.isnan(bandwidth):
+                print("bandwidth was NaN...!? setting to default 0.1")
+                bandwidth = 0.1
 		
             # Fit and evaluate the KDE.
             kde = kp.FFTKDE(bw=bandwidth).fit(data)
@@ -1051,6 +1054,9 @@ class InversionIterator(object):
             n, d = data.shape
             sigma = np.std(data, ddof=1)
             bandwidth = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma
+            if np.isnan(bandwidth):
+                print("bandwidth was NaN...!? setting to default 0.1")
+                bandwidth = 0.1
 
             # Fit and evaluate the KDE.
             kde = kp.FFTKDE(bw=bandwidth).fit(data) #may want to try 'epa' kernel here which is finite
@@ -2036,6 +2042,11 @@ def arrival_dict(dataframe, event_id):
     dataframe = dataframe.set_index("event_id")
     fields = ["network", "station", "phase", "time"]
     dataframe = dataframe.loc[event_id, fields]
+
+    #if dataframe has only 1 item, it is converted to a Series
+    #this ensures it remains a DataFrame
+    if not isinstance(dataframe,pd.DataFrame):
+        dataframe = dataframe.to_frame().T	
     
     #failsafe against weirdness or if stations have their start/end times set incorrectly
     #need to revisit first <=1 part, unclear if that ever happens normally

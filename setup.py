@@ -16,7 +16,7 @@ author          = "Hongjian Fang and Malcolm C. A. White"
 requires_python = ">=3.8"
 packages        = ["pyvorotomo"]
 required        = [
-    "KDEpy>=1.0.3",
+    "KDEpy>=1.1.8",
     "mpi4py",
     "numpy>=1.24.0",
     "pandas",

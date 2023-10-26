@@ -1080,9 +1080,10 @@ class InversionIterator(object):
             # Assign weights to the arrivals.
             dataweight = 1 / interpdat # np.exp(interpdat)
             #arrivals["weight"] = dataweight
-            # revise this latter, remove data with distance large than 150km
-            # let user set the max_dist for phase cutoff
-            idx = arrivals[(arrivals['delta']<min_dist) | (arrivals['delta']>max_dist)].index
+	    # remove far or bad data
+	    maxresidual =  3 * abs(arrivals['residual']).std()
+            idx = arrivals[(arrivals['delta']<min_dist) | (arrivals['delta']>max_dist) \
+		| (abs(arrivals['residual'])>maxresidual) ].index
             dataweight[idx] = dataweight.min()
             arrivals["weight"] = dataweight
 
@@ -1095,6 +1096,10 @@ class InversionIterator(object):
             _arrivals.loc[idx, "weight"] = arrivals["weight"]
             _arrivals = _arrivals.reset_index()
             self.arrivals = _arrivals
+
+	    # Show us how inconsitent our data is
+            print("mean %s residual (s)     : %.3f" % (phase,arrivals['residual'].mean()) )
+            print("    mean abs residual (s): %.3f" % arrivals['residual'].abs().mean() )
 
         self.synchronize(attrs=["arrivals"])
 
@@ -1235,13 +1240,15 @@ class InversionIterator(object):
         nreal = self.cfg["algorithm"]["nreal"]
         relocation_method = self.cfg["relocate"]["method"]
         max_dist = self.cfg["algorithm"]["max_dist"]
-        min_dist = self.cfg["algorithm"]["min_dist"]
-        #phase_order = self.cfg["algorithm"]["phase_order"]       
+        min_dist = self.cfg["algorithm"]["min_dist"]  
 
         self.iiter += 1
         
-        phase_order = ['P', 'S'] # TODO allow changes
-
+        try:
+            phase_order = self.cfg["algorithm"]["phase_order"]
+        except:
+            phase_order =  ['P', 'S']
+	    
         logger.info(f"Iteration #{self.iiter} (/{niter}).")
 
         for phase in phase_order:

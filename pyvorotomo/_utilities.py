@@ -262,6 +262,11 @@ def parse_cfg(configuration_file):
         "algorithm",
         "paretos_alpha"
     )
+    _cfg["phase_order"] = [str(v) for v in parser.get(
+            "algorithm",
+            "phase_order"
+        ).split(",")
+    ]       
     _cfg["hvr"] = [float(v) for v in parser.get(
             "algorithm",
             "hvr"

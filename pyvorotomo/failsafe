@@ -842,7 +842,7 @@ class InversionIterator(object):
         Update arrival weights using KDE.
         """
 
-        logger.info("Updating arrival weights (random) for homogeneous raypath sampling.")
+        logger.info("Updating %s arrival weights (random) for homogeneous raypath sampling" % phase)
 
         if RANK == ROOT_RANK:
             arrivals = self.arrivals
@@ -923,7 +923,7 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
-	    data_range[data_range == 0] = 1e-5 #failsafe
+            data_range[data_range == 0] = 1e-5 #failsafe
             data_delta = data - data_min
             data = data_delta / data_range
 
@@ -976,7 +976,7 @@ class InversionIterator(object):
         Update arrival weights using KDE.
         """
 
-        logger.info("Updating arrival weights for homogeneous raypath sampling.")
+        logger.info("Updating %s arrival weights for homogeneous raypath sampling" % phase)
 
         if RANK == ROOT_RANK:
             arrivals = self.arrivals
@@ -1045,7 +1045,7 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
-	    data_range[data_range == 0] = 1e-5 #failsafe
+            data_range[data_range == 0] = 1e-5 #failsafe
             data_delta = data - data_min
             data = data_delta / data_range
             
@@ -1075,7 +1075,7 @@ class InversionIterator(object):
             dataweight = 1 / interpdat # np.exp(interpdat)
             #arrivals["weight"] = dataweight
 	    # remove far or bad data
-	    maxresidual =  3 * abs(arrivals['residual']).std()
+            maxresidual =  3 * abs(arrivals['residual']).std()
             idx = arrivals[(arrivals['delta']<min_dist) | (arrivals['delta']>max_dist) \
 		| (abs(arrivals['residual'])>maxresidual) ].index
             dataweight[idx] = dataweight.min()

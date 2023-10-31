@@ -942,13 +942,9 @@ class InversionIterator(object):
             # regular grid.
             interpolator = scipy.interpolate.RegularGridInterpolator(points,
                                                                      values,
-                                                                     bounds_error=False)
+                                                                     bounds_error=True)
 
-            # failsafe
             interpdat = interpolator(data)
-            if np.isnan(interpdat).any():
-                print("WARNING! nans found in interpolator.. fixing..")
-                interpdat = np.nan_to_num(interpdat,nan=1e10)
             
             # Assign weights to the arrivals.
             if self.iiter<6:
@@ -1064,16 +1060,12 @@ class InversionIterator(object):
             # regular grid.
             interpolator = scipy.interpolate.RegularGridInterpolator(points,
                                                                      values,
-                                                                     bounds_error = False)
+                                                                     bounds_error = True)
             # attempt to safeguard this (testing, RCP)
             interpdat = interpolator(data)
-            if np.isnan(interpdat).any():
-                print("WARNING: nans found in interpolator! fixing...")
-                interpdat = np.nan_to_num(interpdat,nan=1e10)
 
             # Assign weights to the arrivals.
-            dataweight = 1 / interpdat # np.exp(interpdat)
-            #arrivals["weight"] = dataweight
+            dataweight = 1 / np.exp(interpdat)
 	    # remove far or bad data
             maxresidual =  3 * abs(arrivals['residual']).std()
             idx = arrivals[(arrivals['delta']<min_dist) | (arrivals['delta']>max_dist) \

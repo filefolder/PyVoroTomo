@@ -732,15 +732,11 @@ class InversionIterator(object):
         if RANK == ROOT_RANK:
             nevent = self.cfg["algorithm"]["nevent"]
             
-            # Remove events with NaN residual (!)
-            events = self.events[self.events['residual'].notnull()]
-            
             # Limit maximum requested
             nevent = min(nevent, len(events))
             
-            # Sample events.
-            #events = self.events.sample(n=nevent, weights=None)
-            events = events.sample(n=nevent, weights='weight')
+            # Sample events
+            events = self.events.sample(n=nevent, weights='weight')
             self.sampled_events = events
 
         self.synchronize(attrs=["sampled_events"])
@@ -947,9 +943,9 @@ class InversionIterator(object):
             interpdat = interpolator(data)
             
             # Assign weights to the arrivals.
-            if self.iiter<6:
+            if self.iiter<2:
                 events["weight"] = 1.0 / interpdat
-            elif 6<=self.iiter<10:
+            elif 2<=self.iiter<6:
                 events["weight"] = 1.0 / np.exp(interpdat)
             else:
                 events["weight"] = 1.0

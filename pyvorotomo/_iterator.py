@@ -732,8 +732,8 @@ class InversionIterator(object):
         if RANK == ROOT_RANK:
             nevent = self.cfg["algorithm"]["nevent"]
             
-            # Limit maximum requested
-            nevent = min(nevent, len(events))
+            # Limit maximum requested to ~75% total
+            nevent = min(nevent, len(self.events)*.75)
             
             # Sample events
             events = self.events.sample(n=nevent, weights='weight')

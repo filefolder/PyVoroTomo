@@ -943,9 +943,9 @@ class InversionIterator(object):
             interpdat = interpolator(data)
             
             # Assign weights to the arrivals.
-            if self.iiter<2:
+            if self.iiter<=2:
                 events["weight"] = 1.0 / interpdat
-            elif 2<=self.iiter<6:
+            elif 2<self.iiter<6:
                 events["weight"] = 1.0 / np.exp(interpdat)
             else:
                 events["weight"] = 1.0

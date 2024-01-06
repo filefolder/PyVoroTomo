@@ -2005,14 +2005,17 @@ class InversionIterator(object):
 
             handle = f"{phase}wave_model"
             model = getattr(self, handle)
-#            model.values = values
+	    orig_model = model.values.copy()
+	    watermask = model.values < 0.1 #model is in VELOCITY here
             values = np.power(model.values, -1) + values
             model.values = np.power(values, -1)
+	    model.values[watermask] = orig_model #restore original low-velocity areas
 
             handle = f"{phase}wave_variance"
             model = getattr(self, handle)
             model.values = variance
 
+	orig_model = None
         attrs = [f"{phase}wave_model"]
         self.synchronize(attrs=attrs)
 

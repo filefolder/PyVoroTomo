@@ -1247,7 +1247,7 @@ class InversionIterator(object):
                     self._sample_events()
                     self._sample_arrivals(phase)
                     self._trace_rays(phase)
-		    mod_nvoroni = int(nvoronoi*np.random.uniform(low=-.3, high=.3)) #NEW add 30% variability
+		    mod_nvoronoi = int(nvoronoi*np.random.uniform(low=-.3, high=.3)) #NEW add 30% variability
                     self._generate_voronoi_cells(
                         phase,
                         kvoronoi,

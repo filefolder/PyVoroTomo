@@ -304,6 +304,10 @@ def parse_cfg(configuration_file):
         "algorithm",
         "outlier_removal_factor"
     )
+    _cfg["max_arrival_residual"] = parser.getfloat(
+        "algorithm",
+        "max_arrival_residual"
+    )    
     _cfg["damp"] = parser.getfloat(
         "algorithm",
         "damp"

@@ -694,6 +694,7 @@ class InversionIterator(object):
 
         if RANK == ROOT_RANK:
             tukey_k = self.cfg["algorithm"]["outlier_removal_factor"]
+            max_arr_resid = self.cfg["algorithm"]["max_arrival_residual"] #NEW
             narrival = self.cfg["algorithm"]["narrival"]
 
             # Subset for the arrivals associated with sampled events.
@@ -709,7 +710,7 @@ class InversionIterator(object):
             arrivals = arrivals.loc[phase]
 
             # Remove outliers.
-            arrivals = remove_outliers(arrivals, tukey_k, "residual")
+            arrivals = remove_outliers(arrivals, tukey_k, "residual", max_arr_resid) #NEW
 
             # Sample arrivals.
             narrival = min(len(arrivals), narrival)
@@ -731,12 +732,17 @@ class InversionIterator(object):
 
         if RANK == ROOT_RANK:
             nevent = self.cfg["algorithm"]["nevent"]
-            
+            max_evt_resid = self.cfg["algorithm"]["max_event_residual"] #NEW            
+
+            # Remove outliers.
+            events = remove_outliers(self.events, None, "residual", max_evt_resid) #NEW
+
             # Limit maximum requested
-            nevent = min(nevent, len(self.events))
+            nevent = min(nevent, len(events))
             
             # Sample events
-            events = self.events.sample(n=nevent, weights='weight')
+            events = events.sample(n=nevent, weights='weight')
+
             self.sampled_events = events
 
         self.synchronize(attrs=["sampled_events"])
@@ -2062,19 +2068,25 @@ def arrival_dict(dataframe, event_id):
 
     return (_arrival_dict)
 
-def remove_outliers(dataframe, tukey_k, column):
+def remove_outliers(dataframe, tukey_k, column, max_resid=3.0):
     """
     Return DataFrame with outliers removed using Tukey fences.
+    ALSO remove any arrival or event beyond max_resid.
     """
 
-    q1, q3 = dataframe[column].quantile(q=[0.25, 0.75])
-    iqr = q3 - q1
-    vmin = q1 - tukey_k * iqr
-    vmax = q3 + tukey_k * iqr
-    dataframe = dataframe[
-         (dataframe[column] > vmin)
-        &(dataframe[column] < vmax)
-    ]
+    if max_resid:
+        dataframe = dataframe[
+             (dataframe[column] <= max_resid)
+            &(dataframe[column] >= -max_resid)]
+
+    if tukey_k:
+        q1, q3 = dataframe[column].quantile(q=[0.25, 0.75])
+        iqr = q3 - q1
+        vmin = q1 - tukey_k * iqr
+        vmax = q3 + tukey_k * iqr
+        dataframe = dataframe[
+             (dataframe[column] > vmin)
+            &(dataframe[column] < vmax)]
 
     return (dataframe)
 

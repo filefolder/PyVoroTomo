@@ -1633,7 +1633,7 @@ class InversionIterator(object):
             dn = n0 - len(self.stations)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} duplicate stations {n0} remain."
+                    f"Dropped {dn} duplicate stations {n0-dn} remain."
                 )
 
             # Drop duplicate arrivals.
@@ -1643,7 +1643,7 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} duplicate arrivals {n0} remain."
+                    f"Dropped {dn} duplicate arrivals {n0-dn} remain."
                 )
                 
             # Drop duplicate events.
@@ -1666,7 +1666,7 @@ class InversionIterator(object):
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} events with < {min_narrival} arrivals. {n0} remain."
+                    f"Dropped {dn} events with < {min_narrival} arrivals. {n0-dn} remain."
                 )
                 
             # Drop arrivals out of desired distance range (NEW!)
@@ -1808,7 +1808,7 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(
-                    f"Dropped {dn} arrivals without associated stations. {n0} remain."
+                    f"Dropped {dn} arrivals without associated stations. {n0-dn} remain."
                 )
 
         self.synchronize(attrs=["stations"])

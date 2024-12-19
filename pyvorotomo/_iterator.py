@@ -33,38 +33,99 @@ RANK       = COMM.Get_rank()
 WORLD_SIZE = COMM.Get_size()
 ROOT_RANK  = _constants.ROOT_RANK
 
-def dist_on_unit_sphere(lat1, lon1, lat2, lon2):
-    # Convert latitude and longitude from decimal degrees to radians
-    phi1 = np.radians(lat1)
-    phi2 = np.radians(lat2)
-    theta1 = np.radians(lon1)
-    theta2 = np.radians(lon2)
+DEG_TO_RAD = np.pi / 180.0
+RAD_TO_DEG = 180.0 / np.pi
+EARTH_RADIUS = 6371.0  # km
 
-    # Calculate the spherical distance from the law of cosines
-    dtheta = theta2 - theta1
-    delta_phi = phi2 - phi1
-    a = np.sin(delta_phi/2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dtheta/2)**2
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-    return np.degrees(c)
+def dist_on_unit_sphere(lat1, lon1, lat2, lon2):
+    """
+    Vectorized calculation of spherical distance.
+    Works with both single values and arrays.
+    
+    Parameters:
+    -----------
+    lat1, lon1, lat2, lon2 : float or array-like
+        Coordinates in decimal degrees
+    
+    Returns:
+    --------
+    float or array-like
+        Distance in degrees
+    """
+    # Convert inputs to arrays for vectorization
+    lat1, lon1, lat2, lon2 = map(np.asarray, (lat1, lon1, lat2, lon2))
+    
+    # Convert to radians
+    phi1 = lat1 * DEG_TO_RAD
+    phi2 = lat2 * DEG_TO_RAD
+    
+    # Pre-compute trigonometric functions
+    cos_phi1 = np.cos(phi1)
+    cos_phi2 = np.cos(phi2)
+    
+    dlon = (lon2 - lon1) * DEG_TO_RAD
+    dlat = (lat2 - lat1) * DEG_TO_RAD
+    
+    # Use sine squared directly
+    sin_dlat_2 = np.sin(0.5 * dlat)
+    sin_dlon_2 = np.sin(0.5 * dlon)
+    
+    # Optimized haversine formula
+    a = sin_dlat_2 * sin_dlat_2 + cos_phi1 * cos_phi2 * sin_dlon_2 * sin_dlon_2
+    
+    # Use np.maximum to avoid numerical errors
+    a = np.minimum(a, 1.0)  # Ensure a doesn't exceed 1 due to floating point errors
+    
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+    return c * RAD_TO_DEG
 
 def dist_km(lat1, lon1, lat2, lon2):
-    # Convert latitude and longitude from decimal degrees to radians
-    phi1 = np.radians(lat1)
-    phi2 = np.radians(lat2)
-    delta_phi = np.radians(lat2 - lat1)
-    delta_lon = np.radians(lon2 - lon1)
+    """
+    Vectorized calculation of distance in kilometers.
+    Works with both single values and arrays.
+    
+    Parameters:
+    -----------
+    lat1, lon1, lat2, lon2 : float or array-like
+        Coordinates in decimal degrees
+    
+    Returns:
+    --------
+    float or array-like
+        Distance in kilometers
+    """
+    # Convert inputs to arrays for vectorization
+    lat1, lon1, lat2, lon2 = map(np.asarray, (lat1, lon1, lat2, lon2))
+    
+    # Convert to radians
+    phi1 = lat1 * DEG_TO_RAD
+    phi2 = lat2 * DEG_TO_RAD
+    
+    # Pre-compute trigonometric functions
+    cos_phi1 = np.cos(phi1)
+    cos_phi2 = np.cos(phi2)
+    
+    dlon = (lon2 - lon1) * DEG_TO_RAD
+    dlat = (lat2 - lat1) * DEG_TO_RAD
+    
+    # Use sine squared directly
+    sin_dlat_2 = np.sin(0.5 * dlat)
+    sin_dlon_2 = np.sin(0.5 * dlon)
+    
+    # Optimized haversine formula
+    a = sin_dlat_2 * sin_dlat_2 + cos_phi1 * cos_phi2 * sin_dlon_2 * sin_dlon_2
+    
+    # Use np.maximum to avoid numerical errors
+    a = np.minimum(a, 1.0)  # Ensure a doesn't exceed 1 due to floating point errors
+    
+    return EARTH_RADIUS * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
 
-    # Calculate the spherical distance using the Haversine formula
-    a = np.sin(delta_phi/2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(delta_lon/2)**2
-    distance = 6371 * 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-    return distance
 
 class InversionIterator(object):
     """
     A class providing core functionality for iterating inversion
     procedure.
     """
-
 
     def __init__(self, argc):
 
@@ -326,6 +387,147 @@ class InversionIterator(object):
     def voronoi_cells(self, value):
         self._voronoi_cells = value
 
+    @_utilities.log_errors(logger)
+    def check_event_bounds(self):
+        """
+        Remove events that have been runaway migrated beyond some boundary depth, latitude, or longitude
+        """
+
+        logger.info("Removing out of bounds events.")
+
+        if RANK == ROOT_RANK:
+
+            max_lat = self.cfg["algorithm"]["max_lat"]
+            min_lat = self.cfg["algorithm"]["min_lat"]
+            max_lon = self.cfg["algorithm"]["max_lon"]
+            min_lon = self.cfg["algorithm"]["min_lon"]
+            max_depth = self.cfg["algorithm"]["max_depth"]
+            min_depth = self.cfg["algorithm"]["min_depth"]
+
+            # If values are set to anything but a number, disregard
+            max_lat = self.cfg["algorithm"]["max_lat"]
+            max_lat = 91 if max_lat == 9999 else max_lat
+
+            min_lat = self.cfg["algorithm"]["min_lat"]
+            min_lat = -91 if min_lat == 9999 else min_lat
+
+            max_lon = self.cfg["algorithm"]["max_lon"]
+            max_lon = 361 if max_lon == 9999 else max_lon
+
+            min_lon = self.cfg["algorithm"]["min_lon"]
+            min_lon = -361 if min_lon == 9999 else min_lon
+
+            max_depth = self.cfg["algorithm"]["max_depth"]
+            max_depth = 9999 if max_depth == 9999 else max_depth
+
+            min_depth = self.cfg["algorithm"]["min_depth"]
+            min_depth = -100 if min_depth == 9999 else min_depth
+
+            events = self.events
+            n0 = len(events)
+            events0 = self.events0 # e.g. input catalog
+            merged = pd.merge(events0, events, on='event_id', suffixes=('_0', ''))
+
+            filtered = merged.copy()
+            filters = [
+                ('lat', lambda df: (df['latitude'] >= min_lat) & (df['latitude'] <= max_lat)),
+                ('lon', lambda df: (df['longitude'] >= min_lon) & (df['longitude'] <= max_lon)),
+                ('depth', lambda df: (df['depth'] >= min_depth) & (df['depth'] <= max_depth))
+            ]
+
+            for filter_name, condition in filters:
+                before_count = len(filtered)
+                filtered = filtered[condition]
+                after_count = len(filtered)
+                dropped_count = before_count - after_count
+                #logger.info(f"   ...{filter_name} filter: {dropped_count} events dropped ({after_count} remaining)")
+                logger.info(" %10s bounds filter: %5d events dropped (%5d remaining)" % (filter_name,dropped_count,after_count))
+
+            dropped_event_ids = set(events['event_id']) - set(filtered['event_id'])
+
+            events = filtered[events.columns]
+            #events = events.reset_index() # don't reset index
+            self.events = events
+
+            if len(dropped_event_ids) > 0:
+                dn = len(dropped_event_ids)
+                # also have to toss any arrivals referencing these dropped events
+                arrivals = self.arrivals
+                arrivals = arrivals[~arrivals['event_id'].isin(dropped_event_ids)] #.reset_index() don't reset index
+                self.arrivals = arrivals
+                logger.info(f"   ...Dropped {dn} events which are out of bounds. {n0-dn} remain.")
+
+        self.synchronize(attrs=['events','arrivals'])
+        return (True)
+
+    @_utilities.log_errors(logger)
+    def check_event_migration(self):
+        """
+        Remove events that have been runaway migrated beyond some tolerance
+        """
+
+        logger.info("Removing runaway event migrations.")
+
+        if RANK == ROOT_RANK:
+
+            #max_evt_resid = self.cfg["algorithm"]["max_event_residual"]
+            max_evt_resid = 3.0
+            max_dlat = self.cfg["algorithm"]["max_dlat"]
+            max_dlon = self.cfg["algorithm"]["max_dlon"]
+            max_ddepth = self.cfg["algorithm"]["max_ddepth"]
+            max_dtime = self.cfg["algorithm"]["max_dtime"]
+
+            events = self.events
+            n0 = len(events)
+            events0 = self.events0 # e.g. input catalog
+            merged = pd.merge(events0, events, on='event_id', suffixes=('_0', ''))
+
+            # Calculate absolute differences
+            merged['dlat'] = np.abs(merged['latitude'] - merged['latitude_0'])
+            merged['dlon'] = np.abs(merged['longitude'] - merged['longitude_0'])
+            merged['ddepth'] = np.abs(merged['depth'] - merged['depth_0'])
+            merged['dtime'] = np.abs(merged['time'] - merged['time_0'])
+
+            # and the variance
+            std_dlat = np.std(merged['dlat'])
+            std_dlon = np.std(merged['dlon'])
+            std_ddepth = np.std(merged['ddepth'])
+            std_dtime = np.std(merged['dtime'])
+
+            N=2
+            filtered = merged.copy()
+            filters = [
+                ('dlat', lambda df: df['dlat'] <= min(max_dlat, N*std_dlat)),
+                ('dlon', lambda df: df['dlon'] <= min(max_dlon, N*std_dlon)),
+                ('ddepth', lambda df: df['ddepth'] <= min(max_ddepth, N*std_ddepth)),
+                ('dtime', lambda df: df['dtime'] <= min(max_dtime, N*std_dtime)),
+                ('residual', lambda df: df['residual'] <= max_evt_resid)]
+
+            for filter_name, condition in filters:
+                before_count = len(filtered)
+                filtered = filtered[condition]
+                after_count = len(filtered)
+                dropped_count = before_count - after_count
+                #logger.info(f"   ...{filter_name} filter: {dropped_count} events dropped ({after_count} remaining)")
+                logger.info(" %10s migration filter: %5d events dropped (%5d remaining)" % (filter_name,dropped_count,after_count))
+
+            dropped_event_ids = set(events['event_id']) - set(filtered['event_id'])
+
+            events = filtered[events.columns]
+            self.events = events
+
+            if len(dropped_event_ids) > 0:
+                dn = len(dropped_event_ids)
+                # also have to toss any arrivals referencing these dropped events
+                arrivals = self.arrivals
+                arrivals = arrivals[~arrivals['event_id'].isin(dropped_event_ids)]
+                self.arrivals = arrivals
+                logger.info(f"   ...Dropped {dn} events which have migrated too far from original position. {n0-dn} remain.")
+                for ele in dropped_event_ids.sort():
+                    logger.info(f"droppedevent: {ele}")
+
+        self.synchronize(attrs=['events','arrivals'])
+        return (True)
 
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
@@ -373,14 +575,10 @@ class InversionIterator(object):
         delta_slowness = self.projection_matrix * x[:nvoronoi]
         delta_slowness = delta_slowness.reshape(model.npts)
         slowness = delta_slowness
-#        slowness = np.power(model.values, -1) + delta_slowness
-#        velocity = np.power(slowness, -1)
 
         if phase == "P":
-#            self.pwave_realization_stack[self.ireal] = velocity
             self.pwave_realization_stack[self.ireal] = slowness
         else:
-#            self.swave_realization_stack[self.ireal] = velocity
             self.swave_realization_stack[self.ireal] = slowness
 
         return (True)
@@ -577,6 +775,7 @@ class InversionIterator(object):
 
             if kvoronoi > 0:
                 k_medians_npts = self.cfg["algorithm"]["k_medians_npts"]
+		k_medians_npts = k_medians_npts = max(10, k_medians_npts + np.random.randint(-k_medians_npts//4, k_medians_npts//4)) # add 25% randomization
 
                 raypaths = []
                 raypath_dir = self.raypath_dir
@@ -623,6 +822,154 @@ class InversionIterator(object):
 
         return (True)
 
+    @_utilities.log_errors(logger)
+    def _generate_voronoi_cells_adaptive(self, phase, kvoronoi, nvoronoi, alpha, data_weight=0.5):
+        """
+        Generate Voronoi cells using a fast, semi-adaptive approach.
+        
+        :param phase: The seismic phase to consider
+        :param kvoronoi: Number of cells to generate using k-medians clustering
+        :param nvoronoi: Total number of Voronoi cells to generate
+        :param alpha: Parameter controlling the distribution of cells (0 for uniform, higher for more bias towards one end)
+        :param data_weight: Weight given to data-driven distribution (0-1)
+        """
+        logger.debug(
+            f"Generating {nvoronoi} Voronoi cells with {kvoronoi} using semi-adaptive approach."
+        )
+	
+        if RANK == ROOT_RANK:
+            min_coords = self.pwave_model.min_coords
+            max_coords = self.pwave_model.max_coords
+            delta = max_coords - min_coords
+
+            # Generate base distribution
+            rho = np.random.rand(nvoronoi, 1) * delta[0] + min_coords[0]
+            if alpha > 0:
+                randpts = np.random.gamma(2.0, alpha, size=(nvoronoi,1))
+                randpts = randpts / randpts.max()
+                rho = max_coords[0] - randpts * delta[0]
+            
+            theta_phi = np.random.rand(nvoronoi, 2) * delta[1:] + min_coords[1:]
+            
+            # Quick adaptive adjustment based on data density
+            if data_weight > 0:
+                density = self._estimate_data_density(phase)
+                
+                density = density.reshape(-1)  # Flatten to 1D
+                
+                # Adjust rho based on data density
+                num_points = len(density)
+                interp_points = np.linspace(0, num_points-1, nvoronoi)
+                rho_shift = np.interp(interp_points, np.arange(num_points), density)
+                rho_shift = (rho_shift - 0.5) * 0.2  # Scale to [-0.1, 0.1]
+                rho += rho_shift.reshape(-1, 1) * delta[0] * data_weight
+                
+                # Adjust theta_phi based on data density
+                theta_phi_shift = np.column_stack([
+                    rho_shift,  # Reuse same shift for simplicity
+                    rho_shift
+                ])
+                theta_phi += theta_phi_shift * delta[1:] * data_weight
+
+            # Combine into base_cells
+            base_cells = np.hstack([rho, theta_phi])
+            
+            # Perform k-medians clustering if specified
+            if kvoronoi > 0:
+                points = self._sample_raypaths(phase, min(len(self.sampled_arrivals), kvoronoi * 10))
+                medians = _clustering.k_medians(kvoronoi, points)
+                base_cells[-kvoronoi:] = medians
+
+            self.voronoi_cells = base_cells
+
+        self.synchronize(attrs=["voronoi_cells"])
+        return True
+
+    # next two functions needed for adaptive meshing
+    def _estimate_data_density(self, phase, nbins=40):
+        """
+        Quickly estimate data density based on arrival counts.
+        First joins arrivals with stations to get coordinates.
+        """
+        arrivals = self.sampled_arrivals
+        events = self.events
+        stations = self.stations
+        
+        arrival_coords = arrivals.merge(
+            stations[['network', 'station', 'depth', 'latitude', 'longitude']], 
+            on=['network', 'station'],
+            how='left'
+        )
+        
+        points_data = arrival_coords.merge(
+            events,
+            on='event_id',
+            how='inner'
+        )
+        
+        if len(points_data) == 0:
+            return np.ones(nbins**3) / nbins**3
+        
+        # Create a coarse 3D histogram of event-station midpoints
+        points = np.column_stack([
+            (points_data['longitude_x'].values + points_data['longitude_y'].values) / 2,
+            (points_data['latitude_x'].values + points_data['latitude_y'].values) / 2,
+            (points_data['depth_x'].values + points_data['depth_y'].values) / 2
+        ])
+        
+        # Handle any NaN values
+        valid_points = ~np.isnan(points).any(axis=1)
+        if not np.any(valid_points):
+            return np.ones(nbins**3) / nbins**3
+        
+        points = points[valid_points]
+        hist, _ = np.histogramdd(points, bins=nbins)
+        density = hist.flatten() / max(hist.max(), 1e-10)
+        return density
+
+    def _sample_raypaths(self, phase, n_samples):
+        """
+        Quickly sample points along raypaths.
+        First joins arrivals with stations to get coordinates.
+        """
+        # Sample arrivals
+        arrivals = self.sampled_arrivals.sample(n=min(len(self.sampled_arrivals), n_samples))
+        
+        # Join with stations to get coordinates
+        arrival_coords = arrivals.merge(
+            self.stations[['network', 'station', 'depth', 'latitude', 'longitude']], 
+            on=['network', 'station'],
+            how='left'
+        )
+        
+        # Join with events using event_id column
+        points_data = arrival_coords.merge(
+            self.events,
+            on='event_id',
+            how='inner'
+        )
+        
+        if len(points_data) == 0:
+            min_coords = self.pwave_model.min_coords
+            max_coords = self.pwave_model.max_coords
+            return np.random.rand(n_samples, 3) * (max_coords - min_coords) + min_coords
+        
+        # Linearly interpolate between event and station
+        t = np.random.rand(len(points_data))
+        points = np.column_stack([
+            points_data['longitude_x'].values * (1-t) + points_data['longitude_y'].values * t,
+            points_data['latitude_x'].values * (1-t) + points_data['latitude_y'].values * t,
+            points_data['depth_x'].values * (1-t) + points_data['depth_y'].values * t
+        ])
+        
+        # Handle any NaN values
+        valid_points = ~np.isnan(points).any(axis=1)
+        if not np.any(valid_points):
+            min_coords = self.pwave_model.min_coords
+            max_coords = self.pwave_model.max_coords
+            return np.random.rand(n_samples, 3) * (max_coords - min_coords) + min_coords
+            
+        return points[valid_points]
 
     @_utilities.log_errors(logger)
     def _projected_ray_idxs(self, raypath, hvr=1):
@@ -925,7 +1272,7 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
-            data_range[data_range == 0] = 1e-5 #failsafe
+            data_range[data_range == 0] = 1e-9 #failsafe
             data_delta = data - data_min
             data = data_delta / data_range
 
@@ -1043,7 +1390,7 @@ class InversionIterator(object):
             data_min = data.min(axis=0)
             data_max = data.max(axis=0)
             data_range = data_max - data_min
-            data_range[data_range == 0] = 1e-5 #failsafe
+            data_range[data_range == 0] = 1e-9 #failsafe
             data_delta = data - data_min
             data = data_delta / data_range
             
@@ -1228,7 +1575,8 @@ class InversionIterator(object):
         nreal = self.cfg["algorithm"]["nreal"]
         relocation_method = self.cfg["relocate"]["method"]
         max_dist = self.cfg["algorithm"]["max_dist"]
-        min_dist = self.cfg["algorithm"]["min_dist"]  
+        min_dist = self.cfg["algorithm"]["min_dist"]
+	adaptive_voronoi = self.cfg["algorithm"]["adaptive_voronoi_cells"]
 
         self.iiter += 1
         
@@ -1244,22 +1592,24 @@ class InversionIterator(object):
             self._update_events_weights()
         for hvr in hvrs:
             self._reset_realization_stack(phase)
+	    self.check_event_bounds()
             for phase in phase_order:
                 logger.info(f"Updating {phase}-wave model")
                 for self.ireal in range(nreal):
-                    logger.info(
-                        f"Realization #{self.ireal+1} (/{nreal}) with hvr = {hvr}."
-                    )
+                    logger.info(f"Realization #{self.ireal+1} (/{nreal}) with hvr = {hvr}.")
                     self._sample_events()
                     self._sample_arrivals(phase)
                     self._trace_rays(phase)
-		    mod_nvoronoi = int(nvoronoi*np.random.uniform(low=.7, high=1.5)) #NEW add variability
-                    self._generate_voronoi_cells(
-                        phase,
-                        kvoronoi,
-                        mod_nvoronoi,
-                        alpha
-                    )
+                    mod_nvoronoi = int(nvoronoi*np.random.uniform(low=0.75, high=1.25)) # randomize a lot (25%)
+                    mod_alpha = max(0, alpha + np.random.randint(-2,4)) # randomize a little
+                    if adaptive_voronoi:
+                            self._generate_voronoi_cells_adaptive(
+                                phase,kvoronoi,mod_nvoronoi,mod_alpha
+                            )
+                    else:
+                            self._generate_voronoi_cells(
+                                phase,kvoronoi,mod_nvoronoi,mod_alpha
+                            )
                     self._update_projection_matrix(hvr=hvr)
                     self._compute_sensitivity_matrix(phase, hvr=hvr)
                     self._compute_model_update(phase)
@@ -1267,7 +1617,10 @@ class InversionIterator(object):
                 self.save_model(phase, tag=f"h{hvr}")
             self.compute_traveltime_lookup_tables()
             self.relocate_events(method=relocation_method)
-            self.purge_raypaths()
+            if self.iiter <= 1:
+                self.check_event_migration() # check to see if EQs clearly weren't located properly
+            self.check_event_bounds() # ensure events do "runaway migrate" beyond desired bounds
+	    self.purge_raypaths()
         self.update_arrival_residuals()
         self.save_events()
 

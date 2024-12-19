@@ -1,6 +1,8 @@
 import numpy as np
 
 EARTH_RADIUS              = 6371.
+DEG_TO_RAD                = np.pi / 180.0
+RAD_TO_DEG                = 180.0 / np.pi
 ROOT_RANK                 = 0
 DISPATCH_REQUEST_TAG      = 100
 DISPATCH_TRANSMISSION_TAG = 101

@@ -2009,6 +2009,10 @@ class InversionIterator(object):
                     f"Dropped {dn} duplicate events {n0-dn} remain."
                 )
 
+	    # Drop events with invalid residuals
+            self.events = self.events.dropna(subset='residual')
+            self.arrivals = self.arrivals.dropna(subset='residual')
+
             # Drop events without minimum number of arrivals
             min_narrival = self.cfg["algorithm"]["min_narrival"]
             n0 = len(self.events)
@@ -2109,6 +2113,7 @@ class InversionIterator(object):
             n0 = len(self.events)
             bool_idx = self.events["event_id"].isin(self.arrivals["event_id"])
             self.events = self.events[bool_idx]
+            self.events0 = self.events.copy() # also save a copy of the original events to track drift over time		
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(

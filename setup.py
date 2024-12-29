@@ -17,7 +17,7 @@ requires_python = ">=3.8"
 packages        = ["pyvorotomo"]
 required        = [
     "KDEpy>=1.1.8",
-    "mpi4py",
+    "mpi4py<4.0", #haven't tested
     "numpy>=1.24.0",
     "pandas",
     "pykonal>=0.2.3b4",

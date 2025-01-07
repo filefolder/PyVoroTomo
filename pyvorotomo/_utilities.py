@@ -321,7 +321,57 @@ def parse_cfg(configuration_file):
     _cfg["max_event_residual"] = parser.getfloat(
         "algorithm",
         "max_event_residual"
-    )    
+    )
+    _cfg["max_dlat"] = parser.getfloat(
+        "algorithm",
+        "max_dlat",
+        fallback=1
+    )
+    _cfg["max_dlon"] = parser.getfloat(
+        "algorithm",
+        "max_dlon",
+        fallback=1
+    )
+    _cfg["max_ddepth"] = parser.getfloat(
+        "algorithm",
+        "max_ddepth",
+        fallback=50
+    )
+    _cfg["max_dtime"] = parser.getfloat(
+        "algorithm",
+        "max_dtime",
+        fallback=5
+    )
+    _cfg["max_lat"] = parser.getfloat(
+        "algorithm",
+        "max_lat",
+        fallback=9999
+    )
+    _cfg["max_lon"] = parser.getfloat(
+        "algorithm",
+        "max_lon",
+        fallback=9999
+    )
+    _cfg["min_lat"] = parser.getfloat(
+        "algorithm",
+        "min_lat",
+        fallback=9999
+    )
+    _cfg["min_lon"] = parser.getfloat(
+        "algorithm",
+        "min_lon",
+        fallback=9999
+    )
+    _cfg["min_depth"] = parser.getfloat(
+        "algorithm",
+        "min_depth",
+        fallback=9999
+    )
+    _cfg["max_depth"] = parser.getfloat(
+        "algorithm",
+        "max_depth",
+        fallback=9999
+    )
     _cfg["damp"] = parser.getfloat(
         "algorithm",
         "damp"

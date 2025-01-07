@@ -245,6 +245,16 @@ def parse_cfg(configuration_file):
     parser.read(configuration_file)
 
     _cfg = dict()
+    _cfg["adaptive_voronoi_cells"] = parser.getboolean(
+        "algorithm",
+        "adaptive_voronoi_cells",
+        fallback=False
+    )
+    _cfg["adaptive_data_weight"] = parser.getfloat(
+        "algorithm",
+        "adaptive_data_weight",
+        fallback=0.5
+    )
     _cfg["niter"] = parser.getint(
         "algorithm",
         "niter",

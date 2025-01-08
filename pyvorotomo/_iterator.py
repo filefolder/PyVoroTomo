@@ -8,8 +8,10 @@ import pandas as pd
 import pykonal
 import scipy.sparse
 import scipy.spatial
+from scipy.stats import iqr #for updated KDE code
 import shutil
 import tempfile
+
 
 from . import _dataio
 from . import _clustering
@@ -747,13 +749,12 @@ class InversionIterator(object):
         Generate Voronoi cells using k-medians clustering of raypaths.
         """
 
-        logger.debug(
-            f"Generating {kvoronoi} Voronoi cells using k-medians clustering "
-            f"and {nvoronoi} randomly distributed base Voronoi cells."
-        )
-
         if RANK == ROOT_RANK:
-
+	    logger.debug(
+	        f"Generating {kvoronoi} Voronoi cells using k-medians clustering "
+	        f"and {nvoronoi} randomly distributed base Voronoi cells."
+	    )
+		
             min_coords = self.pwave_model.min_coords
             max_coords = self.pwave_model.max_coords
 
@@ -833,11 +834,10 @@ class InversionIterator(object):
         :param alpha: Parameter controlling the distribution of cells (0 for uniform, higher for more bias towards one end)
         :param data_weight: Weight given to data-driven distribution (0-1)
         """
-        logger.debug(
-            f"Generating {nvoronoi} Voronoi cells with {kvoronoi} using semi-adaptive approach."
-        )
+
         if RANK == ROOT_RANK:
-            min_coords = self.pwave_model.min_coords
+            logger.debug(f"Generating {nvoronoi} Voronoi cells with {kvoronoi} k-medians clusters using semi-adaptive approach.")
+	    min_coords = self.pwave_model.min_coords
             max_coords = self.pwave_model.max_coords
             delta = max_coords - min_coords
 
@@ -1090,15 +1090,13 @@ class InversionIterator(object):
         in HDF5 file. Only trace non-existent raypaths.
         """
 
-        logger.info("Tracing rays.")
-
         raypath_dir = self.raypath_dir
         arrivals = self.sampled_arrivals
         arrivals = arrivals.set_index(["network", "station"])
         arrivals = arrivals.sort_index()
 
         if RANK == ROOT_RANK:
-
+            logger.info("Tracing rays.")
             os.makedirs(raypath_dir, exist_ok=True)
             index = arrivals.index.unique()
             self._dispatch(index)
@@ -1158,7 +1156,7 @@ class InversionIterator(object):
                             raypath = traveltime.trace_ray(coords)
                             dataset[:, idx] = raypath.T.copy()
                         except:
-                            print("traveltime issue with event_id", event_id)
+                            logger.warning(f"traveltime issue with event_id {event_id}, coords {coords}, {network}, {station}, {phase}")
                             continue
                         
                     raypath_file.close()
@@ -1481,14 +1479,12 @@ class InversionIterator(object):
         Compute traveltime-lookup tables.
         """
 
-        logger.info("Computing traveltime-lookup tables.")
-
         traveltime_dir = self.traveltime_dir
 
-        logger.debug(f"Working in {traveltime_dir}")
-
         if RANK == ROOT_RANK:
-
+            logger.info("Computing traveltime-lookup tables.")		
+            logger.info(f"    ...Working in {traveltime_dir}")
+		
             os.makedirs(traveltime_dir, exist_ok=True)
             ids = zip(self.stations["network"], self.stations["station"])
             self._dispatch(sorted(ids))
@@ -1623,10 +1619,9 @@ class InversionIterator(object):
         Remove events that have been runaway migrated beyond some boundary depth, latitude, or longitude
         """
 
-        logger.info("Removing out of bounds events.")
-
         if RANK == ROOT_RANK:
-
+            logger.info("Removing out of bounds events.")
+		
             max_lat = self.cfg["algorithm"]["max_lat"]
             min_lat = self.cfg["algorithm"]["min_lat"]
             max_lon = self.cfg["algorithm"]["max_lon"]
@@ -1694,10 +1689,9 @@ class InversionIterator(object):
         Remove events that have been runaway migrated beyond some tolerance
         """
 
-        logger.info("Removing runaway event migrations.")
-
         if RANK == ROOT_RANK:
-
+            logger.info("Removing runaway event migrations.")
+		
             max_evt_resid = self.cfg["algorithm"]["max_event_residual"]
             #max_evt_resid = 3.0
             max_dlat = self.cfg["algorithm"]["max_dlat"]
@@ -1775,10 +1769,9 @@ class InversionIterator(object):
         other processes.
         """
 
-        logger.info("Loading configuration-file parameters.")
-
         if RANK == ROOT_RANK:
-
+            logger.info("Loading configuration-file parameters.")
+		
             # Parse configuration-file parameters.
             self.cfg = _utilities.parse_cfg(self.argc.configuration_file)
             _utilities.write_cfg(self.argc, self.cfg)
@@ -1797,10 +1790,9 @@ class InversionIterator(object):
         processes.
         """
 
-        logger.info("Loading event data.")
-
         if RANK == ROOT_RANK:
-
+            logger.info("Loading event data.")
+		
             # Parse event data.
             data = _dataio.parse_event_data(self.argc)
             self.events, self.arrivals = data
@@ -1824,10 +1816,9 @@ class InversionIterator(object):
         processes.
         """
 
-        logger.info("Loading network geometry")
-
         if RANK == ROOT_RANK:
-
+            logger.info("Loading network geometry.")
+		
             # Parse event data.
             stations = _dataio.parse_network_geometry(self.argc)
             self.stations = stations
@@ -1846,10 +1837,9 @@ class InversionIterator(object):
         processes.
         """
 
-        logger.info("Loading velocity models.")
-
         if RANK == ROOT_RANK:
-
+            logger.info("Loading velocity models.")
+		
             # Parse velocity model files.
             velocity_models = _dataio.parse_velocity_models(self.cfg)
             self.pwave_model, self.swave_model = velocity_models
@@ -1892,11 +1882,12 @@ class InversionIterator(object):
         """
         Relocate all events based on linear inversion and update the "events" attribute.
         """
-
-        logger.info("Relocating events with linear inversion.")
+	    
         raypath_dir = self.raypath_dir
 
         if RANK == ROOT_RANK:
+            logger.info("Relocating events with linear inversion.")
+	
             events = self.events.set_index("event_id")
             events["idx"] = range(len(events))
             arrivals = self.arrivals
@@ -2120,10 +2111,9 @@ class InversionIterator(object):
         Sanitize input data.
         """
 
-        logger.info("Sanitizing data.")
-
         if RANK == ROOT_RANK:
-
+            logger.info("Sanitizing data.")
+		
             # Drop duplicate stations.
             keys = ["network", "station"]
             n0 = len(self.stations)

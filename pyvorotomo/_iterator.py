@@ -35,10 +35,6 @@ RANK       = COMM.Get_rank()
 WORLD_SIZE = COMM.Get_size()
 ROOT_RANK  = _constants.ROOT_RANK
 
-DEG_TO_RAD = np.pi / 180.0
-RAD_TO_DEG = 180.0 / np.pi
-EARTH_RADIUS = 6371.0  # km
-
 def dist_on_unit_sphere(lat1, lon1, lat2, lon2):
     """
     Vectorized calculation of spherical distance.
@@ -58,15 +54,15 @@ def dist_on_unit_sphere(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(np.asarray, (lat1, lon1, lat2, lon2))
     
     # Convert to radians
-    phi1 = lat1 * DEG_TO_RAD
-    phi2 = lat2 * DEG_TO_RAD
+    phi1 = lat1 * _constants.DEG_TO_RAD
+    phi2 = lat2 * _constants.DEG_TO_RAD
     
     # Pre-compute trigonometric functions
     cos_phi1 = np.cos(phi1)
     cos_phi2 = np.cos(phi2)
     
-    dlon = (lon2 - lon1) * DEG_TO_RAD
-    dlat = (lat2 - lat1) * DEG_TO_RAD
+    dlon = (lon2 - lon1) * _constants.DEG_TO_RAD
+    dlat = (lat2 - lat1) * _constants.DEG_TO_RAD
     
     # Use sine squared directly
     sin_dlat_2 = np.sin(0.5 * dlat)
@@ -79,7 +75,7 @@ def dist_on_unit_sphere(lat1, lon1, lat2, lon2):
     a = np.minimum(a, 1.0)  # Ensure a doesn't exceed 1 due to floating point errors
     
     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
-    return c * RAD_TO_DEG
+    return c * _constants.RAD_TO_DEG
 
 def dist_km(lat1, lon1, lat2, lon2):
     """
@@ -100,15 +96,15 @@ def dist_km(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(np.asarray, (lat1, lon1, lat2, lon2))
     
     # Convert to radians
-    phi1 = lat1 * DEG_TO_RAD
-    phi2 = lat2 * DEG_TO_RAD
+    phi1 = lat1 * _constants.DEG_TO_RAD
+    phi2 = lat2 * _constants.DEG_TO_RAD
     
     # Pre-compute trigonometric functions
     cos_phi1 = np.cos(phi1)
     cos_phi2 = np.cos(phi2)
     
-    dlon = (lon2 - lon1) * DEG_TO_RAD
-    dlat = (lat2 - lat1) * DEG_TO_RAD
+    dlon = (lon2 - lon1) * _constants.DEG_TO_RAD
+    dlat = (lat2 - lat1) * _constants.DEG_TO_RAD
     
     # Use sine squared directly
     sin_dlat_2 = np.sin(0.5 * dlat)
@@ -120,7 +116,7 @@ def dist_km(lat1, lon1, lat2, lon2):
     # Use np.maximum to avoid numerical errors
     a = np.minimum(a, 1.0)  # Ensure a doesn't exceed 1 due to floating point errors
     
-    return EARTH_RADIUS * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+    return _constants.EARTH_RADIUS * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
 
 
 class InversionIterator(object):

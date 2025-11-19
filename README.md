@@ -6,8 +6,10 @@ This is a moderately revamped version of the original PyVoroTomo by Fang et al. 
 
 ## Documentation
 # Installation
-Easiest to clone into your directory ($ git pull https://github.com/filefolder/PyVoroTomo.git )
-and install locally via pip, `$ python -m pip install ./PyVoroTomo` which will install the **pyvorotomo** executable
+Easiest to clone into your directory: 
+`$ git pull https://github.com/filefolder/PyVoroTomo.git`
+and install locally via pip, `$ python -m pip install ./PyVoroTomo`
+... which will install the **pyvorotomo** executable
 
 See also: [https://github.com/malcolmw/PyVoroTomo/wiki/Installation](https://github.com/malcolmw/PyVoroTomo/wiki/Installation)
 

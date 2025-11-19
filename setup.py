@@ -12,17 +12,17 @@ name            = "pyvorotomo"
 description     = "Parsimonious Voronoi-cell based tomograph (Fang et al., 2019)"
 url             = "https://github.com/malcolmw/PyVoroTomo"
 email           = "malcolm.white@.usc.edu"
-author          = "Hongjian Fang and Malcolm C. A. White"
-requires_python = ">=3.8"
+author          = "Hongjian Fang and Malcolm C. A. White and Robert Pickle"
+requires_python = ">=3.9"
 packages        = ["pyvorotomo"]
 required        = [
-    "KDEpy>=1.0.3",
-    "mpi4py",
+    "KDEpy>=1.1.12",
+    "mpi4py>=4.0",
     "numpy>=1.24.0",
     "pandas",
     "pykonal>=0.2.3b4",
     "tables",
-    "scipy"
+    "scipy>=1.16"
 ]
 scripts         = ["bin/pyvorotomo"]
 license         = "GNU GPLv3"
@@ -56,7 +56,7 @@ setup(
         "Operating System :: POSIX :: Linux",
         "Programming Language :: Python",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: Implementation :: CPython",
         "Topic :: Scientific/Engineering :: Physics"
     ]

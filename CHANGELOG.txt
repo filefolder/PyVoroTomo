@@ -1,0 +1,17 @@
+V2.0.0
+- Added automatic "checkerboard" resolution testing
+- Added ability to perform joint teleseismic inversions also
+- Expand parameter features & abilities
+- Expanded LSMR information and iterative solution logging
+- Automatic LSMR damping calculator
+- Interpret model variance in km/s
+- Handle water/land velocity model boundaries better
+- Added adaptive meshing (experimental)
+- Added flexibility with restarting or skipping phases
+- Additional QC to remove bad events/arrivals
+- Various speed improvements & updated dependencies
+- New plotting and catalog generation scripts
+- Synthetic test datasets
+
+- (Tweaks to pykonal also...) 
+

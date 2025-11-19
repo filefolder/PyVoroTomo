@@ -10,7 +10,7 @@ import pandas as pd
 import pykonal
 
 from . import _constants
-from . import _picklable
+from . import _picklabel
 
 def parse_event_data(argc):
     """
@@ -77,12 +77,12 @@ def parse_velocity_models(cfg):
     Parse and return velocity models specified in configuration.
 
     Velocity models are returned as a two-tuple of
-    _picklable.ScalarField3D objects. The first entry is the P-wave and
+    _picklabel.ScalarField3D objects. The first entry is the P-wave and
     the second is the S-wave model.
     """
 
-    pwave_model = _picklable.ScalarField3D(coord_sys="spherical")
-    swave_model = _picklable.ScalarField3D(coord_sys="spherical")
+    pwave_model = _picklabel.ScalarField3D(coord_sys="spherical")
+    swave_model = _picklabel.ScalarField3D(coord_sys="spherical")
 
 
     path = cfg["model"]["initial_pwave_path"]

@@ -3,8 +3,8 @@
 """
 An MPI script to invert traveltime data for velocity.
 
-.. author:: Malcolm C. A. White
-.. date:: 2020-04-17
+.. author:: Malcolm C. A. White, edits by Pickle
+.. date:: 2020-04-17, 2025-10-31
 """
 
 import pykonal
@@ -17,7 +17,7 @@ except ValueError:
     print("Invalid version of PyKonal detected. Version >=0.2.3 required.")
     exit(-1)
 
-import signal
+import signal,os
 
 # Import local modules.
 from pyvorotomo import _iterator
@@ -32,33 +32,55 @@ def main(argc):
     """
     The main control loop.
     """
-
-    logger.info("Starting main loop.")
-
-    # Instantiate an InversionIterator object.
+    logger.info(">>>  Starting PyVoroTomo  <<<")
+    
+    # Instantiate an InversionIterator object
     inversion_iterator = _iterator.InversionIterator(argc)
-
-    # Load configuration-file parameters.
+    
+    # Always load configuration first
     inversion_iterator.load_cfg()
+    
+    # Check if we're only running a resolution test
+    if argc.test_only:
+        logger.info("__Running resolution test only__")
+        inversion_iterator.load_network_geometry()
+        
+        # Check if testing existing results vs current state
+        rerun_dir = inversion_iterator.cfg["model"].get("rerun_restest", "")
 
-    # Load initial velocity models.
+        if rerun_dir and os.path.exists(rerun_dir):
+            #logger.info(f"Testing existing results from {rerun_dir}")
+            pass
+        else: ## I think this else catch shouldn't exist.. the rerun dir is mandatory!! TODO TODO
+            logger.info("Testing current model state - loading all data")
+            # Need full setup for current state test
+            inversion_iterator.load_velocity_models()
+            inversion_iterator.load_event_data()
+            inversion_iterator.sanitize_data()
+            inversion_iterator.synchronize(attrs="all")
+            inversion_iterator.compute_traveltime_lookup_tables()
+            inversion_iterator.update_arrival_residuals()
+        
+        # Run the resolution test
+        inversion_iterator.iterate()
+        return True
+    
+    # Regular inversion workflow
+    logger.info("Running full inversion workflow")
+    
+    # Load initial velocity models
     inversion_iterator.load_velocity_models()
-
     # Load event data.
     inversion_iterator.load_event_data()
-
     # Load network geometry.
     inversion_iterator.load_network_geometry()
-
     # Sanitize event data and network metadata.
     inversion_iterator.sanitize_data()
-
-    # Syncronize data across all processes.
+    # Synchronize data across all processes.
     inversion_iterator.synchronize(attrs="all")
-
     # Compute traveltime-lookup tables.
     inversion_iterator.compute_traveltime_lookup_tables()
-
+    
     if argc.relocate_first is True:
         # Relocate all events.
         relocation_method = inversion_iterator.cfg["relocate"]["method"]
@@ -66,26 +88,31 @@ def main(argc):
             raise (
                 NotImplementedError(
                     "Relocating events before the first iteration using a "
-                    "linearized inversion has not neen implemented. Please "
+                    "linearized inversion has not been implemented. Please "
                     "use the DE relocation method or omit the -r option."
                 )
             )
         inversion_iterator.relocate_events(method=relocation_method)
-
-    # Update arrival residuals.
-    inversion_iterator.update_arrival_residuals()
-
-    # Save initial data.
+    else:
+        # Update arrival residuals (relocate events does this otherwise)
+        inversion_iterator.update_arrival_residuals()
+    
+    # Save initial data
     for phase in inversion_iterator.phases:
         inversion_iterator.save_model(phase)
     inversion_iterator.save_events()
-
+    
+    # Run inversion iterations
     niter = inversion_iterator.cfg["algorithm"]["niter"]
     for iiter in range(niter):
         inversion_iterator.iterate()
 
-    logger.debug("Thread completed without error.")
-    return (True)
+    # Run the checkerboard test, if asked
+    if inversion_iterator.cfg["model"].get("perform_res_test"):
+        inversion_iterator.run_resolution_test()
+    
+    logger.info("All done thank you!")
+    return True
 
 
 if __name__ == "__main__":

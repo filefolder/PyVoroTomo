@@ -57,7 +57,7 @@ def configure_logger(name, log_file, verbose=False):
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 
-    return (True)
+    return True
 
 
 def get_logger(name):
@@ -65,7 +65,7 @@ def get_logger(name):
     Return the logger for *name*.
     """
 
-    return (logging.getLogger(name))
+    return logging.getLogger(name)
 
 
 def log_errors(logger):
@@ -91,9 +91,9 @@ def log_errors(logger):
                 )
                 raise (exc)
 
-        return (_decorated_func)
+        return _decorated_func
 
-    return (_decorate_func)
+    return _decorate_func
 
 
 def root_only(rank, default=True, barrier=True):
@@ -122,9 +122,9 @@ def root_only(rank, default=True, barrier=True):
                     COMM.barrier()
                 return (default)
 
-        return (_decorated_func)
+        return _decorated_func
 
-    return (_decorate_func)
+    return _decorate_func
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -192,6 +192,12 @@ def parse_args():
         help="Scratch directory."
     )
     parser.add_argument(
+        "-t",
+        "--test_only",
+        action="store_true",
+        help="Only run a resolution test."
+    )    
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -204,7 +210,6 @@ def parse_args():
         help="Save realizations to disk."
     )
 
-
     args = parser.parse_args()
 
     if args.log_file is None:
@@ -215,8 +220,8 @@ def parse_args():
         "network",
         "configuration_file",
         "log_file",
-        "output_dir"
-    ):
+        "output_dir"):
+
         _attr = getattr(args, attr)
         _attr = os.path.abspath(_attr)
         setattr(args, attr, _attr)
@@ -232,7 +237,7 @@ def parse_args():
 
     COMM.barrier()
 
-    return (args)
+    return args
 
 
 def parse_cfg(configuration_file):
@@ -245,39 +250,75 @@ def parse_cfg(configuration_file):
     parser.read(configuration_file)
 
     _cfg = dict()
+
+    _cfg["adaptive_data_weight"] = parser.getfloat(
+        "algorithm",
+        "adaptive_data_weight",
+        fallback=0.3
+    )
     _cfg["niter"] = parser.getint(
         "algorithm",
         "niter",
         fallback=1
     )
-    _cfg["kvoronoi"] = parser.getint(
+    _cfg["kvoronoi"] = parser.getfloat(
         "algorithm",
-        "kvoronoi"
+        "kvoronoi",
+        fallback=5
     )
     _cfg["nvoronoi"] = parser.getint(
         "algorithm",
-        "nvoronoi"
+        "nvoronoi",
+        fallback=300
+    )
+    _cfg["min_rays_per_cell"] = parser.getint(
+        "algorithm",
+        "min_rays_per_cell",
+        fallback=3
     )
     _cfg["paretos_alpha"] = parser.getfloat(
         "algorithm",
         "paretos_alpha"
     )
-    _cfg["hvr"] = [float(v) for v in parser.get(
-            "algorithm",
-            "hvr"
+    _cfg["phase_order"] = [str(v) for v in parser.get(
+        "algorithm",
+        "phase_order",
+        fallback='P,S'
         ).split(",")
     ]
+    _cfg["hvr"] = parser.getfloat(
+        "algorithm",
+        "hvr",
+        fallback=3
+    )
+    _cfg["min_dist"] = parser.getfloat(
+        "algorithm",
+        "min_dist",
+        fallback=1
+    )
+    _cfg["max_dist"] = parser.getfloat(
+        "algorithm",
+        "max_dist",
+        fallback=150
+    )
+    _cfg["cutoff_depth"] = parser.getfloat(
+        "algorithm",
+        "cutoff_depth",
+        fallback=50
+    )
     _cfg["nreal"] = parser.getint(
         "algorithm",
         "nreal"
     )
-    _cfg["k_medians_npts"] = parser.getint(
+    _cfg["k_medians_percent"] = parser.getfloat(
         "algorithm",
-        "k_medians_npts"
+        "k_medians_percent",
+        fallback=15
     )
     _cfg["min_narrival"] = parser.getint(
         "algorithm",
-        "min_narrival"
+        "min_narrival",
+        fallback=9
     )
     _cfg["narrival"] = parser.getint(
         "algorithm",
@@ -287,9 +328,80 @@ def parse_cfg(configuration_file):
         "algorithm",
         "nevent"
     )
+    _cfg["narrival_percent"] = parser.getfloat(
+        "algorithm",
+        "narrival_percent",
+        fallback=-1
+    )
+    _cfg["nevent_percent"] = parser.getfloat(
+        "algorithm",
+        "nevent_percent",
+        fallback=-1
+    )
     _cfg["outlier_removal_factor"] = parser.getfloat(
         "algorithm",
-        "outlier_removal_factor"
+        "outlier_removal_factor",
+        fallback=1.5
+    )
+    _cfg["max_arrival_residual"] = parser.getfloat(
+        "algorithm",
+        "max_arrival_residual",
+        fallback=1.0
+    )
+    _cfg["max_event_residual"] = parser.getfloat(
+        "algorithm",
+        "max_event_residual",
+        fallback=1.5
+    )
+    _cfg["max_dlat"] = parser.getfloat(
+        "algorithm",
+        "max_dlat",
+        fallback=1
+    )
+    _cfg["max_dlon"] = parser.getfloat(
+        "algorithm",
+        "max_dlon",
+        fallback=1
+    )
+    _cfg["max_ddepth"] = parser.getfloat(
+        "algorithm",
+        "max_ddepth",
+        fallback=50
+    )
+    _cfg["max_dtime"] = parser.getfloat(
+        "algorithm",
+        "max_dtime",
+        fallback=5
+    )
+    _cfg["max_lat"] = parser.getfloat(
+        "algorithm",
+        "max_lat",
+        fallback=9999
+    )
+    _cfg["max_lon"] = parser.getfloat(
+        "algorithm",
+        "max_lon",
+        fallback=9999
+    )
+    _cfg["min_lat"] = parser.getfloat(
+        "algorithm",
+        "min_lat",
+        fallback=9999
+    )
+    _cfg["min_lon"] = parser.getfloat(
+        "algorithm",
+        "min_lon",
+        fallback=9999
+    )
+    _cfg["min_depth"] = parser.getfloat(
+        "algorithm",
+        "min_depth",
+        fallback=9999
+    )
+    _cfg["max_depth"] = parser.getfloat(
+        "algorithm",
+        "max_depth",
+        fallback=9999
     )
     _cfg["damp"] = parser.getfloat(
         "algorithm",
@@ -303,13 +415,14 @@ def parse_cfg(configuration_file):
         "algorithm",
         "btol"
     )
-    _cfg["conlim"] = parser.getfloat(
+    _cfg["conlim"] = parser.getint(
         "algorithm",
         "conlim"
     )
-    _cfg["maxiter"] = parser.getfloat(
+    _cfg["maxiter"] = parser.getint(
         "algorithm",
-        "maxiter"
+        "maxiter",
+        fallback=10
     )
     cfg["algorithm"] = _cfg
 
@@ -330,11 +443,47 @@ def parse_cfg(configuration_file):
     _cfg["initial_swave_path"] = initial_swave_path
     cfg["model"] = _cfg
 
+    map_filter_string = parser.get(
+        "model",
+        "map_filter",
+        fallback=''
+    )
+    _cfg["map_filter"] = [float(x.strip()) for x in map_filter_string.split(",")] if map_filter_string else ''
+
+
+    perform_res_test = parser.get(
+        "model",
+        "perform_res_test"
+    )
+    _cfg["perform_res_test"] = parser.getboolean(
+        "model",
+        "perform_res_test",
+        fallback=False
+    )
+
+    res_test_string = parser.get(
+        "model",
+        "res_test_size_mag",
+        fallback='80,10,.05'
+    )
+    _cfg["res_test_size_mag"] = [float(x.strip()) for x in res_test_string.split(",")]
+
+    rerun_restest = parser.get(
+        "model",
+        "rerun_restest",
+        fallback=''
+    )
+    if rerun_restest.strip():
+        _cfg["rerun_restest"] = os.path.abspath(rerun_restest)
+    else:
+        _cfg["rerun_restest"] = ''
+
     _cfg = dict()
     _cfg["method"] = parser.get(
         "relocate",
         "method"
     ).upper()
+
     if _cfg["method"] == "LINEAR":
         # Parse parameters for linearized relocation.
         _cfg["atol"] = parser.getfloat(
@@ -387,15 +536,14 @@ def parse_cfg(configuration_file):
         )
     cfg["relocate"] = _cfg
 
-    return (cfg)
+    return cfg
 
 
 def signal_handler(sig, frame):
     """
     A utility function to to handle interrupting signals.
     """
-
-    raise (SystemError("Interrupting signal received... aborting"))
+    raise SystemError("Interrupting signal received... aborting")
 
 
 def write_cfg(argc, cfg):
@@ -414,4 +562,4 @@ def write_cfg(argc, cfg):
     with open(path, "w") as configuration_file:
         parser.write(configuration_file)
 
-    return (True)
+    return True

@@ -466,12 +466,12 @@ def parse_cfg(configuration_file):
     res_test_layers_string = parser.get(
         "model",
         "res_test_layers",
-        fallback=None
+        fallback=""
     )
     _cfg["res_test_layers"] = (
         [float(x.strip()) for x in res_test_layers_string.split(",")]
-        if res_test_layers_string is not None
-        else None
+        if res_test_layers_string
+        else ""
     )
 
     rerun_restest = parser.get(

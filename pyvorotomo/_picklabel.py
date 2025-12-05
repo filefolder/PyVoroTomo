@@ -21,7 +21,7 @@ class ScalarField3D(pykonal.fields.ScalarField3D):
             self.values
         )
 
-        return (ScalarField3D._unpickle, state)
+        return ScalarField3D._unpickle, state
 
     def _unpickle(coord_sys, min_coords, node_intervals, npts, values):
         """
@@ -35,4 +35,4 @@ class ScalarField3D(pykonal.fields.ScalarField3D):
         field.npts = npts
         field.values = values
 
-        return (field)
+        return field

@@ -1,9 +1,10 @@
 V2.0.0
-- Added automatic "checkerboard" resolution testing
+- Added automatic "checkerboard" resolution testing at arbitrary depth
 - Added ability to perform joint teleseismic inversions also
 - Expand parameter features & abilities
 - Expanded LSMR information and iterative solution logging
 - Automatic LSMR damping calculator
+- Track individual arrival/events progress for QC 
 - Interpret model variance in km/s
 - Handle water/land velocity model boundaries better
 - Added adaptive meshing (experimental)

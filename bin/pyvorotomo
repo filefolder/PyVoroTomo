@@ -52,32 +52,31 @@ def main(argc):
             #logger.info(f"Testing existing results from {rerun_dir}")
             pass
         else: ## I think this else catch shouldn't exist.. the rerun dir is mandatory!! TODO TODO
-            logger.info("Testing current model state - loading all data")
-            # Need full setup for current state test
-            inversion_iterator.load_velocity_models()
-            inversion_iterator.load_event_data()
-            inversion_iterator.sanitize_data()
-            inversion_iterator.synchronize(attrs="all")
-            inversion_iterator.compute_traveltime_lookup_tables()
-            inversion_iterator.update_arrival_residuals()
-        
+            logger.info(f"Could not find rerun directory: {rerun_dir}")
+            return False
+
         # Run the resolution test
         inversion_iterator.iterate()
         return True
-    
+
     # Regular inversion workflow
     logger.info("Running full inversion workflow")
-    
+
     # Load initial velocity models
     inversion_iterator.load_velocity_models()
+
     # Load event data.
     inversion_iterator.load_event_data()
+
     # Load network geometry.
     inversion_iterator.load_network_geometry()
+
     # Sanitize event data and network metadata.
     inversion_iterator.sanitize_data()
+
     # Synchronize data across all processes.
     inversion_iterator.synchronize(attrs="all")
+
     # Compute traveltime-lookup tables.
     inversion_iterator.compute_traveltime_lookup_tables()
     
@@ -94,15 +93,15 @@ def main(argc):
             )
         inversion_iterator.relocate_events(method=relocation_method)
     else:
-        # Update arrival residuals (relocate events does this otherwise)
-        inversion_iterator.update_arrival_residuals()
-    
+        # Skip relocation but still update residuals/weights
+        inversion_iterator.relocate_events(weightsonly=True)
+
     # Save initial data
     for phase in inversion_iterator.phases:
         inversion_iterator.save_model(phase)
     inversion_iterator.save_events()
-    
-    # Run inversion iterations
+
+    # Run inversion by iterations
     niter = inversion_iterator.cfg["algorithm"]["niter"]
     for iiter in range(niter):
         inversion_iterator.iterate()
@@ -110,7 +109,7 @@ def main(argc):
     # Run the checkerboard test, if asked
     if inversion_iterator.cfg["model"].get("perform_res_test"):
         inversion_iterator.run_resolution_test()
-    
+
     logger.info("All done thank you!")
     return True
 

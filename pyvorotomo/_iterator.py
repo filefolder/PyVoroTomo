@@ -48,6 +48,7 @@ class InversionIterator(object):
 
         self._argc = argc
         self._arrivals = None
+        self._arrivals_history = None
         self._cfg = None
         self._events = None
         self._iiter = 0
@@ -103,6 +104,14 @@ class InversionIterator(object):
     def arrivals(self):
         return self._arrivals
 
+    @property
+    def arrivals_history(self):
+        return self._arrivals_history
+
+    @arrivals_history.setter
+    def arrivals_history(self, value):
+        self._arrivals_history = value
+
     @arrivals.setter
     def arrivals(self, value):
         self._arrivals = value
@@ -124,6 +133,14 @@ class InversionIterator(object):
         value = value.sort_values("event_id")
         value = value.reset_index(drop=True)
         self._events = value
+
+    @property
+    def events_history(self):
+        return self._events_history
+
+    @events_history.setter
+    def events_history(self, value):
+        self._events_history = value
 
     @property
     def iiter(self):
@@ -374,16 +391,24 @@ class InversionIterator(object):
 
         # Attempt adaptive damping if set to -1
         damp = self.cfg["algorithm"]["damp"]
-
         if damp < 0:
 
             base_damp = np.std(self.residuals.data) / np.median(np.abs(self.sensitivity_matrix.data)) 
 
-            # faster?
             df = pd.DataFrame({'col': sensitivity_coo.col, 'data': np.abs(sensitivity_coo.data)})
             sensitivity_per_cell = df.groupby('col')['data'].median().reindex(range(nvoronoi), fill_value=0).values
             norm_sensitivity = sensitivity_per_cell / np.max(sensitivity_per_cell)
-            damp = base_damp * (1 + 2 * norm_sensitivity)
+            norm_ray_count = ray_counts / np.max(ray_counts)
+            cell_quality = norm_sensitivity/2 + norm_ray_count/2  # should go from 0-1
+
+            if RANK == ROOT_RANK:
+                percentiles = np.percentile(cell_quality, [0, 25, 50, 75, 90])
+                logger.info(f"Cell quality distribution - "
+                            f"0%: {percentiles[0]:.2f}, 25%: {percentiles[1]:.2f}, "
+                            f"50%: {percentiles[2]:.2f}, 75%: {percentiles[3]:.2f}, 90%: {percentiles[4]:.2f}")
+
+            # good = 50% reduction, bad = 100% increase
+            damp = base_damp * (0.5 + 1.5 * (1 - cell_quality))
 
             # Infer dimensions from sensitivity matrix
             total_cols = self.sensitivity_matrix.shape[1]
@@ -404,7 +429,7 @@ class InversionIterator(object):
             ])
             augmented_d = np.concatenate([
                 self.residuals, 
-                np.zeros(nvoronoi + nstation)  # Must match total columns
+                np.zeros(nvoronoi + nstation)
             ])
 
             result = scipy.sparse.linalg.lsmr(
@@ -419,9 +444,9 @@ class InversionIterator(object):
             )
             x, istop, itn, normr, normar, norma, conda, normx = result
 
-            damp = np.mean(damp) # for printing
+            damp = np.mean(damp) # just for logging to get a sense of scale
 
-        # literal value in cfg
+        # use the literal value given in cfg
         else:
             result = scipy.sparse.linalg.lsmr(
                 self.sensitivity_matrix,
@@ -448,7 +473,6 @@ class InversionIterator(object):
 
         #note that damping should be about std(residuals)/conda
         #btol should be our target resolution (or maybe median residual) / normr
-
 
         delta_slowness = self.projection_matrix * x[:nvoronoi]
         delta_slowness = delta_slowness.reshape(model.npts)
@@ -589,7 +613,7 @@ class InversionIterator(object):
                         if len(raypath) < 1:
                             logger.warning("raypath is 0??")
 
-                        _column_idxs, counts = self._projected_ray_idxs(raypath,hvr) #raypath HVR scaling done in this function
+                        _column_idxs, counts = self._projected_ray_idxs(raypath,hvr) # raypath HVR scaling done in this function
                         _column_idxs = np.append(_column_idxs,station_idxs)
                         column_idxs = np.append(column_idxs, _column_idxs)
                         nsegments = np.append(nsegments, len(_column_idxs))
@@ -634,69 +658,6 @@ class InversionIterator(object):
                 tag=_constants.DISPATCH_TRANSMISSION_TAG
             )
 
-        return True
-
-
-    @_utilities.log_errors(logger)
-    def _generate_voronoi_cells_prev(self, phase, kvoronoi, nvoronoi, alpha):
-        """
-        Generate Voronoi cells using k-medians clustering of raypaths.
-        """
-
-        if RANK == ROOT_RANK:
-            logger.debug(
-                f"Generating {nvoronoi} Voronoi cells ({kvoronoi} k-medians, "
-                f"{nvoronoi-kvoronoi} random) with alpha={alpha}"
-            )
-
-            min_coords = self.pwave_model.min_coords
-            max_coords = self.pwave_model.max_coords
-            delta = max_coords - min_coords
-
-            # Generate random base cells
-            if alpha == 0:
-                # Uniform distribution
-                rho = np.random.rand(nvoronoi, 1) * delta[0] + min_coords[0]
-            else:
-                # Bias toward surface using gamma distribution
-                rho_base = np.random.rand(nvoronoi-kvoronoi, 1) * delta[0] + min_coords[0]
-                randpts = np.random.gamma(2.0, alpha, size=(kvoronoi, 1))
-                randpts = randpts / randpts.max()
-                rho_refine = max_coords[0] - randpts * delta[0]
-                rho = np.vstack([rho_base, rho_refine])
-
-            # Random lateral coordinates
-            theta_phi = np.random.rand(nvoronoi, 2) * delta[1:] + min_coords[1:]
-            base_cells = np.hstack([rho, theta_phi])
-
-            # Replace last kvoronoi cells with k-medians clustering if requested
-            if kvoronoi > 0:
-                points = self._sample_raypaths(phase)
-
-                # Apply sampling size control
-                k_medians_percent = self.cfg["algorithm"]["k_medians_percent"]
-                max_points = int(len(self.sampled_arrivals) * k_medians_percent / 100)
-
-                points_variance = np.random.randint(-max_points//4, max_points//4)
-                max_points = max(10, max_points + points_variance)
-
-                if len(points) > max_points:
-                    idxs = np.random.choice(len(points), max_points, replace=False)
-                    points = points[idxs]
-
-                # Run k-medians clustering
-                model_bounds = (min_coords, max_coords)
-                medians = _clustering.k_medians(kvoronoi, points, model_bounds)
-
-                # Replace last kvoronoi cells with k-medians results
-                base_cells[-kvoronoi:] = medians
-
-                logger.info(f"Raypath points ({len(points)}) range: depth {6371-points[:,0].min():.1f} to {6371-points[:,0].max():.1f}")
-                logger.info(f"K-medians centers range: depth {6371-medians[:,0].min():.1f} to {6371-medians[:,0].max():.1f}")
-
-            self.voronoi_cells = base_cells
-
-        self.synchronize(attrs=["voronoi_cells"])
         return True
 
 
@@ -749,7 +710,7 @@ class InversionIterator(object):
                 f"{nvoronoi-kvoronoi} random) with alpha={alpha}, adaptive_weight={adaptive_weight}"
             )
 
-            # (maybe one day allow different model dims?)
+            # Get model parameters
             if phase == "P":
                 model = self.pwave_model
             elif phase == "S":
@@ -761,114 +722,23 @@ class InversionIterator(object):
             max_coords = model.max_coords
             delta = max_coords - min_coords
 
-            # generate base distribution
-            if alpha == 0:
-                # uniform depth distribution
-                rho = np.random.rand(nvoronoi, 1) * delta[0] + min_coords[0]
-            else:
-                # surface-biased distribution using beta
-                # beta(1, alpha) gives values biased toward 0, which we invert for surface bias
-                beta_vals = np.random.beta(1, alpha, size=(nvoronoi, 1))
-                rho = max_coords[0] - beta_vals * delta[0]
+            # Initialize cells array
+            base_cells = None
 
-            # start with random lateral coordinates for all cells
-            theta_phi = np.random.rand(nvoronoi, 2) * delta[1:] + min_coords[1:]
-
-            # apply data-driven adjustment if requested
-            if adaptive_weight > 0:
-                density_3d, edges = self._estimate_data_density(phase, adaptive_weight)
-
-                grid_coords = [
-                    (edges[i][:-1] + edges[i][1:]) / 2 
-                    for i in range(3)
-                ]
-
-                interpolator = scipy.interpolate.RegularGridInterpolator(
-                    grid_coords,
-                    density_3d,
-                    bounds_error=False,
-                    fill_value=0.0
-                )
-
-                # for each cell, evaluate density and apply adjustment
-                for i in range(nvoronoi):
-                    cell_pos = np.array([rho[i, 0], theta_phi[i, 0], theta_phi[i, 1]])
-
-                    # sample density in local neighborhood
-                    search_radius = delta * 0.15  # 15% of model size
-                    n_search = 10
-
-                    # generate search points around current position
-                    search_offsets = np.random.uniform(-1, 1, (n_search, 3)) * search_radius
-                    search_points = cell_pos + search_offsets
-
-                    # clip to model bounds
-                    search_points = np.clip(search_points, min_coords, max_coords)
-
-                    # evaluate density at search points
-                    search_densities = interpolator(search_points)
-                    current_density = interpolator(cell_pos.reshape(1, -1))[0]
-
-                    # find best position (highest density)
-                    best_idx = np.argmax(search_densities)
-                    best_density = search_densities[best_idx]
-
-                    # move toward best position if significantly better
-                    if best_density > current_density * 1.05:  # 5% improvement threshold
-                        move_vector = search_points[best_idx] - cell_pos
-                        # apply weighted move
-                        new_pos = cell_pos + move_vector * adaptive_weight
-
-                        # update cell position
-                        rho[i, 0] = new_pos[0]
-                        theta_phi[i, 0] = new_pos[1]
-                        theta_phi[i, 1] = new_pos[2]
-
-
-            # combine into base_cells
-            base_cells = np.hstack([rho, theta_phi])
-
-            # ensure all cells are within model bounds
-            base_cells[:, 0] = np.clip(base_cells[:, 0], min_coords[0], max_coords[0])
-            base_cells[:, 1] = np.clip(base_cells[:, 1], min_coords[1], max_coords[1])
-            base_cells[:, 2] = np.clip(base_cells[:, 2], min_coords[2], max_coords[2])
-            #faster? base_cells = np.clip(base_cells, min_coords, max_coords)
-
-            # remove too-small cells? a bit silly but doesn't seem to take very much time
-            if 1 == 1:
-                min_distance_rad = float(self.cfg["algorithm"]["min_dist"]) / 6371.0 * 2 # so 2 times the minium event-station distance
-                original_count = len(base_cells)
-
-                tree = cKDTree(base_cells)
-                # Find all pairs within min_distance
-                close_pairs = tree.query_pairs(min_distance_rad)
-                # Mark cells to remove (keep lower index of each pair)
-                to_remove = set()
-                for i, j in close_pairs:
-                    to_remove.add(max(i, j))  # Remove the higher index
-                # Keep cells not marked for removal
-                keep_indices = [i for i in range(len(base_cells)) if i not in to_remove]
-                base_cells = base_cells[keep_indices]
-
-                if len(to_remove) > 0:
-                    logger.info(f"generate_voronoi_cells: removed {len(to_remove)} too-small cells")
-
-            # update nvoronoi to reflect actual count
-            nvoronoi = len(base_cells)
-
-            # replace last kvoronoi cells with k-medians clustering if requested
+            # STEP 1: Generate k-medians cells FIRST (if requested)
             if kvoronoi > 0:
                 points = self._sample_raypaths(phase)
+                # i can't see it happening, but kvoronoi needs to be less then the len(points)! we might could cap it at 90% or something
 
                 if len(points) == 0:
                     logger.warning("No raypath points available for k-medians clustering")
                 else:
                     # Apply sampling size control
-                    k_medians_percent = self.cfg["algorithm"].get("k_medians_percent", 15)  # default 15% percent
+                    k_medians_percent = self.cfg["algorithm"].get("k_medians_percent", 15)
                     max_points = int(len(self.sampled_arrivals) * k_medians_percent / 100)
 
-                    # add some variability to avoid identical clustering
-                    points_variance = np.random.randint(-max_points//4, max_points//4)
+                    # Add some (20%?) variability to avoid identical clustering
+                    points_variance = np.random.randint(-max_points//5, max_points//5)
                     max_points = max(10, max_points + points_variance)
 
                     if len(points) > max_points:
@@ -883,21 +753,15 @@ class InversionIterator(object):
                     )
                     points = points[valid_mask]
 
-                    if len(points) >= 3: # bare minimum
-                        kvoronoi = min(kvoronoi,len(points)) # apply limit
+                    if len(points) >= 3 and kvoronoi >= 3:  # bare minimum
 
-                        # run k-medians clustering in model coordinates
+                        # Run k-medians clustering in model coordinates
                         model_bounds = (min_coords, max_coords)
                         medians = _clustering.k_medians(kvoronoi, points, model_bounds)
 
-                        # verify medians are within bounds (k_medians should handle this)
-                        medians[:, 0] = np.clip(medians[:, 0], min_coords[0], max_coords[0])
-                        medians[:, 1] = np.clip(medians[:, 1], min_coords[1], max_coords[1])
-                        medians[:, 2] = np.clip(medians[:, 2], min_coords[2], max_coords[2])
-                        # TODO faster? medians = np.clip(medians, min_coords, max_coords)
-
-                        # replace last kvoronoi cells with k-medians results
-                        base_cells[-kvoronoi:] = medians
+                        # Verify medians are within bounds
+                        medians = np.clip(medians, min_coords, max_coords)
+                        base_cells = medians
 
                         logger.debug(f"K-medians used {len(points)} raypath points")
                         logger.info(
@@ -907,24 +771,121 @@ class InversionIterator(object):
                     else:
                         logger.warning(f"Insufficient valid raypath points ({len(points)}) for k-medians clusters")
 
+            # STEP 2: Generate random/adaptive cells for the remainder
+            n_random = nvoronoi - kvoronoi
+            
+            if n_random > 0:
+
+                if alpha == 0:
+                    # Uniform depth distribution
+                    rho = np.random.rand(n_random, 1) * delta[0] + min_coords[0]
+                else:
+                    # Higher cell density at surface
+                    beta_vals = np.random.beta(1, alpha, size=(n_random, 1))
+                    rho = max_coords[0] - beta_vals * delta[0]
+
+                # Generate random lateral coordinates
+                theta_phi = np.random.rand(n_random, 2) * delta[1:] + min_coords[1:]
+                random_cells = np.hstack([rho, theta_phi])
+
+                # STEP 3: Apply adaptive meshing ONLY to random cells
+                if adaptive_weight > 0:
+                    density_3d, edges = self._estimate_data_density(phase, adaptive_weight)
+
+                    grid_coords = [
+                        (edges[i][:-1] + edges[i][1:]) / 2 
+                        for i in range(3)
+                    ]
+
+                    interpolator = scipy.interpolate.RegularGridInterpolator(
+                        grid_coords,
+                        density_3d,
+                        bounds_error=False,
+                        fill_value=0.0
+                    )
+
+                    # Apply adjustment to each random cell
+                    for i in range(n_random):
+                        cell_pos = random_cells[i]
+
+                        # Sample density in local neighborhood
+                        search_radius = delta * 0.15
+                        n_search = 10
+
+                        # Generate search points around current position
+                        search_offsets = np.random.uniform(-1, 1, (n_search, 3)) * search_radius
+                        search_points = cell_pos + search_offsets
+
+                        # Clip to model bounds
+                        search_points = np.clip(search_points, min_coords, max_coords)
+
+                        # Evaluate density at search points
+                        search_densities = interpolator(search_points)
+                        current_density = interpolator(cell_pos.reshape(1, -1))[0]
+
+                        # Find best position (highest density)
+                        best_idx = np.argmax(search_densities)
+                        best_density = search_densities[best_idx]
+
+                        # Move toward best position ...if better
+                        if best_density > current_density * 1.05:
+                            move_vector = search_points[best_idx] - cell_pos
+
+                            new_pos = cell_pos + move_vector * adaptive_weight
+                            random_cells[i] = new_pos
+
+                # Ensure random cells are within bounds
+                random_cells = np.clip(random_cells, min_coords, max_coords)
+
+                # STEP 4: Combine k-medians cells (first) with random/adaptive cells (after)
+                if base_cells is not None:
+                    base_cells = np.vstack([base_cells, random_cells])
+                else:
+                    base_cells = random_cells
+
+            # STEP 5: Remove cells that are too close together
+            if self.cfg["algorithm"].get("remove_close_cells", True):
+                min_distance_rad = float(self.cfg["algorithm"]["min_dist"]) / 6371. * 2 # so smallest size is 2x mindist
+                original_count = len(base_cells)
+
+                tree = cKDTree(base_cells)
+                close_pairs = tree.query_pairs(min_distance_rad)
+
+                # Important: preserve k-medians cells preferentially
+                to_remove = set()
+                for i, j in close_pairs:
+                    # If one is a k-medians cell and the other isn't, remove the random one
+                    if i < kvoronoi and j >= kvoronoi:
+                        to_remove.add(j)
+                    elif j < kvoronoi and i >= kvoronoi:
+                        to_remove.add(i)
+                    else:
+                        # Both are same type, remove higher index
+                        to_remove.add(max(i, j))
+
+                keep_indices = [i for i in range(len(base_cells)) if i not in to_remove]
+                base_cells = base_cells[keep_indices]
+
+                if len(to_remove) > 0:
+                    logger.info(f"generate_voronoi_cells: removed {len(to_remove)} too-close cells")
+                    # Update kvoronoi if any k-medians cells were removed
+                    kvoronoi = sum(1 for i in keep_indices if i < kvoronoi)
 
             self.voronoi_cells = base_cells
             
-            # print a bit of info about the average cell size..
-            cell_widths_km = self._estimate_voronoi_cell_widths_simple(base_cells)          
-
-            # quick raypath density check also
+            # Print diagnostics
+            cell_widths_km = self._estimate_voronoi_cell_widths_simple(base_cells)
             n_rays = len(self.sampled_arrivals)
             n_cells = len(self.voronoi_cells)
             rays_per_cell = n_rays / n_cells
 
+            logger.info(f"Cell count: {n_cells} ({kvoronoi} k-medians, {n_cells-kvoronoi} random/adaptive, {len(points)} points)")
             logger.info(f"Average horizontal cell width: {cell_widths_km:.1f} km & rays per cell: {rays_per_cell:.1f}")
-            
+
             if rays_per_cell < self.cfg["algorithm"]["min_rays_per_cell"]:
                 logger.warning(f"Low ray density! Consider reducing nvoronoi and/or increasing events & arrivals")
-            elif rays_per_cell > 3 * self.cfg["algorithm"]["min_rays_per_cell"] :
+            elif rays_per_cell > 3 * self.cfg["algorithm"]["min_rays_per_cell"]:
                 logger.info(f"High ray density! - Could increase nvoronoi for better resolution")
-
 
         self.synchronize(attrs=["voronoi_cells"])
         return True
@@ -1175,6 +1136,7 @@ class InversionIterator(object):
 
         return
 
+
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def _reset_realization_stack(self, phase):
@@ -1192,6 +1154,7 @@ class InversionIterator(object):
             stack = getattr(self,handle)
 
         return
+
 
     @_utilities.log_errors(logger)
     def _sample_arrivals(self, phase, useall=False, do_remove_outliers=True):
@@ -1366,16 +1329,131 @@ class InversionIterator(object):
         COMM.barrier()
         return True
 
+
+    @_utilities.log_errors(logger)
+    def track_residual_improvement(self, min_improvement=0.01, safe_residual=0.3):
+        """
+        Track arrival residuals per iteration,
+        remove if above safe_residual AND not improving
+        min_improvement is a fraction (.01 = 1%), safe_residual in seconds
+        """
+
+        if RANK == ROOT_RANK:
+            logger.debug(f"Tracking residuals for iteration {self.iiter}...")
+
+            current_arrival_ids = set(self.arrivals['arrival_id'])
+            current_event_ids = set(self.events['event_id'])
+
+            # Update only for arrivals/events that still exist
+            history_arrival_mask = self.arrival_history['arrival_id'].isin(current_arrival_ids)
+            self.arrival_history = self.arrival_history[history_arrival_mask].reset_index(drop=True)
+
+            history_event_mask = self.event_history['event_id'].isin(current_event_ids)
+            self.event_history = self.event_history[history_event_mask].reset_index(drop=True)
+
+            # Add residuals for current iteration / create a mapping for efficient lookup
+            arrival_residual_map = dict(zip(self.arrivals['arrival_id'], self.arrivals['residual'].abs()))
+            event_residual_map = dict(zip(self.events['event_id'], self.events['residual'].abs()))
+
+            # Update histories
+            self.arrival_history[f'iter_{self.iiter}'] = (
+                self.arrival_history['arrival_id'].map(arrival_residual_map)
+            )
+            self.event_history[f'iter_{self.iiter}'] = (
+                self.event_history['event_id'].map(event_residual_map)
+            )
+
+            # Check improvements (only for items with valid previous values)
+            prev_col = f'iter_{self.iiter - 1}'
+            curr_col = f'iter_{self.iiter}'
+
+            # Arrival improvements
+            prev_arrival_residuals = self.arrival_history[prev_col]
+            curr_arrival_residuals = self.arrival_history[curr_col]
+
+            # Only check improvement for arrivals with residuals above safe_residual
+            significant_arrival_mask = prev_arrival_residuals > safe_residual
+            arrival_improvement = (prev_arrival_residuals - curr_arrival_residuals) / (prev_arrival_residuals + 1e-6)
+
+            # Only remove if residual is above safe_residual AND not improving
+            arrival_mask_to_remove = significant_arrival_mask & (arrival_improvement < min_improvement)
+            arrivals_to_remove = self.arrival_history.loc[arrival_mask_to_remove, 'arrival_id'].values
+
+            # Calculate mean improvement using mean of residuals
+            mean_prev_arrival = self.arrival_history[prev_col].mean()
+            mean_curr_arrival = self.arrival_history[curr_col].mean()
+            mean_arrival_improvement = ((mean_prev_arrival - mean_curr_arrival) / mean_prev_arrival) * 100 if mean_prev_arrival > 0 else 0
+            logger.info(f"Mean arrival residual reduction: {mean_arrival_improvement:.2f}% "
+                   f"({mean_prev_arrival:.4f} -> {mean_curr_arrival:.4f})")
+
+            # Event improvements
+            prev_event_residuals = self.event_history[prev_col]
+            curr_event_residuals = self.event_history[curr_col]
+
+            # Only check improvement for events with residuals above safe_residual
+            significant_event_mask = prev_event_residuals > safe_residual
+            event_improvement = (prev_event_residuals - curr_event_residuals) / (prev_event_residuals + 1e-6)
+
+            # Only remove if residual is above safe_residual AND not improving
+            event_mask_to_remove = significant_event_mask & (event_improvement < min_improvement)
+            events_to_remove = self.event_history.loc[event_mask_to_remove, 'event_id'].values
+
+            # Calculate mean improvement using mean of residuals
+            mean_prev_event = self.event_history[prev_col].mean()
+            mean_curr_event = self.event_history[curr_col].mean()
+            mean_event_improvement = ((mean_prev_event - mean_curr_event) / mean_prev_event) * 100 if mean_prev_event > 0 else 0
+            logger.info(f"Mean event residual reduction: {mean_event_improvement:.2f}% "
+                   f"({mean_prev_event:.4f} -> {mean_curr_event:.4f})")
+
+            # Remove non-improving events FIRST (and their associated arrivals)
+            if len(events_to_remove) > 0:
+                # Remove events
+                self.events = self.events[~self.events['event_id'].isin(events_to_remove)].reset_index(drop=True)
+                self.event_history = self.event_history[~event_mask_to_remove].reset_index(drop=True)
+
+                # Remove all arrivals associated with removed events
+                arrivals_before = len(self.arrivals)
+                self.arrivals = self.arrivals[~self.arrivals['event_id'].isin(events_to_remove)].reset_index(drop=True)
+                arrivals_removed_by_event = arrivals_before - len(self.arrivals)
+
+                # Update arrival history to remove arrivals from deleted events
+                arrival_event_mask = ~self.arrival_history['event_id'].isin(events_to_remove)
+                self.arrival_history = self.arrival_history[arrival_event_mask].reset_index(drop=True)
+
+                logger.info(f"Removed {len(events_to_remove)} non-improving events (< {min_improvement*100}%) "
+                           f"and {arrivals_removed_by_event} associated arrivals")
+
+            # Remove individual non-improving arrivals (only those not already removed)
+            if len(arrivals_to_remove) > 0:
+                # Filter out arrival_ids that were already removed with their events
+                remaining_arrival_ids = set(self.arrivals['arrival_id'])
+                arrivals_to_remove = [aid for aid in arrivals_to_remove if aid in remaining_arrival_ids]
+
+                if len(arrivals_to_remove) > 0:
+                    if len(arrivals_to_remove) > 0.5 * len(self.arrivals):
+                        logger.warning(f"We are over-removing arrivals and probably need to stop now")
+
+                    self.arrivals = self.arrivals[~self.arrivals['arrival_id'].isin(arrivals_to_remove)].reset_index(drop=True)
+
+                    # Update arrival history
+                    arrival_mask_still_valid = self.arrival_history['arrival_id'].isin(self.arrivals['arrival_id'])
+                    self.arrival_history = self.arrival_history[arrival_mask_still_valid].reset_index(drop=True)
+                    logger.info(f"Removed {len(arrivals_to_remove)} additional non-improving arrivals (< {min_improvement*100}%)")
+
+        self.synchronize(attrs=["arrivals","arrival_history","events","event_history"])
+        return True
+
+
     @_utilities.log_errors(logger)
     def update_event_weights(self,npts=16):
         """
         Update events weights using KDE for homogeneous raypath sampling
-        
+
         Args:
             npts: Number of points for KDE grid evaluation (16 is fine)
         """
         logger.info("Updating event KDE weights for raypath sampling")
-        
+
         if RANK == ROOT_RANK:
             events = self.events
             kde_columns = ["latitude", "longitude", "depth"]
@@ -1491,8 +1569,6 @@ class InversionIterator(object):
         if RANK == ROOT_RANK:
             try:
                 # get parameters
-                max_dist = self.cfg["algorithm"]["max_dist"]
-                min_dist = self.cfg["algorithm"]["min_dist"]
                 max_arr_resid = self.cfg["algorithm"]["max_arrival_residual"]
 
                 arrivals = self.arrivals[self.arrivals["phase"] == phase]
@@ -1568,6 +1644,7 @@ class InversionIterator(object):
                 densities = interpolator(data_normalized)
 
                 # calculate weights... inversely proportional to density of raypaths!
+                # np.exp (at least!) needed to add some separation
                 dataweight = 1 / np.exp(densities)
 
                 # set any infinite or NaN values to 0
@@ -1737,14 +1814,11 @@ class InversionIterator(object):
         niter = self.cfg["algorithm"]["niter"]
         hvr = self.cfg["algorithm"]["hvr"] # note this WAS a list, now just a float
         nvoronoi = self.cfg["algorithm"]["nvoronoi"]
-        kvoronoi = self.cfg["algorithm"]["kvoronoi"] # in percent
-        kvoronoi = int(nvoronoi * kvoronoi/100) # a few % ideally. can increase time of meshing significantly
+        kvoronoi_percent = self.cfg["algorithm"].get("kvoronoi",5)
 
         alpha = self.cfg["algorithm"]["paretos_alpha"]
         nreal = self.cfg["algorithm"]["nreal"]
         relocation_method = self.cfg["relocate"]["method"]
-        max_dist = self.cfg["algorithm"]["max_dist"]
-        min_dist = self.cfg["algorithm"]["min_dist"]
         min_rays_per_cell = self.cfg["algorithm"]["min_rays_per_cell"]
 
         adaptive_weight = self.cfg["algorithm"].get("adaptive_data_weight", 0.0)
@@ -1773,7 +1847,7 @@ class InversionIterator(object):
         for phase in phase_order:
             logger.info(f" >>> Starting {phase}-wave iteration {self.iiter}/{niter} <<<")
 
-            if self.cfg["argc"]["relocate_first"]=="False" and self.iiter == 1: #nb relocate_first arg is a string, not bool
+            if self.cfg["argc"]["relocate_first"]=="False" and self.iiter == 1: # nb relocate_first arg is a string, not bool
                 self.update_arrival_weights(phase)
             self._reset_realization_stack(phase)
 
@@ -1785,9 +1859,11 @@ class InversionIterator(object):
 
                 # add some minor stochastic variability
                 mod_nvoronoi = int(nvoronoi*np.random.uniform(low=0.70, high=1.15)) # mostly dip lower but sometimes higher (TODO set in params?)
+                kvoronoi = int(mod_nvoronoi * kvoronoi_percent/100)
                 mod_kvoronoi = min(kvoronoi,int(mod_nvoronoi*0.7)) # sanity cap k's at 70% total n's
 
-                self._generate_voronoi_cells(phase,mod_kvoronoi,mod_nvoronoi,alpha,adaptive_weight) # if adaptive_weight > 0 --> adaptive meshing
+                self._generate_voronoi_cells(phase,mod_kvoronoi,mod_nvoronoi,alpha,adaptive_weight)
+
                 self._compute_sensitivity_matrix(phase,hvr)
                 self._update_projection_matrix(phase,hvr)
                 self._compute_model_update(phase,min_rays=min_rays_per_cell)
@@ -1799,6 +1875,7 @@ class InversionIterator(object):
 
         self.compute_traveltime_lookup_tables() # without an argument, computes both phases
         self.relocate_events(method=relocation_method) # also calls update_arrival_residuals, update_event_weights, and update_arrival_weights
+        self.track_residual_improvement() # track improvement of residuals and boot any gremlins TODO: can also be used to prematurely stop iterations?
 
         if self.iiter <= 3:
             self.check_event_migration() # implement a check to see if EQs have migrated a great deal (located very poorly to begin with!)
@@ -1806,7 +1883,8 @@ class InversionIterator(object):
         self.purge_raypaths()
         self.resanitize_data()
         self.save_events() #n.b. the first 00.events.h5 is the initial relocated (-r) model, may be faster to start from this in the future
-        #self.save_stations() # not in use but maybe useful?
+        #self.save_stations() # not in use.. yet?
+
 
     @_utilities.log_errors(logger)
     def check_event_bounds(self):
@@ -1816,31 +1894,12 @@ class InversionIterator(object):
         logger.info("Checking for out of bounds events...")
 
         if RANK == ROOT_RANK:
-            max_lat = self.cfg["algorithm"]["max_lat"]
-            min_lat = self.cfg["algorithm"]["min_lat"]
-            max_lon = self.cfg["algorithm"]["max_lon"]
-            min_lon = self.cfg["algorithm"]["min_lon"]
+            max_lat   = self.cfg["algorithm"]["max_lat"]
+            min_lat   = self.cfg["algorithm"]["min_lat"]
+            max_lon   = self.cfg["algorithm"]["max_lon"]
+            min_lon   = self.cfg["algorithm"]["min_lon"]
             max_depth = self.cfg["algorithm"]["max_depth"]
             min_depth = self.cfg["algorithm"]["min_depth"]
-
-            # if values are set to anything but a number, disregard
-            max_lat = self.cfg["algorithm"]["max_lat"]
-            max_lat = 91 if max_lat == 9999 else max_lat
-
-            min_lat = self.cfg["algorithm"]["min_lat"]
-            min_lat = -91 if min_lat == 9999 else min_lat
-
-            max_lon = self.cfg["algorithm"]["max_lon"]
-            max_lon = 361 if max_lon == 9999 else max_lon
-
-            min_lon = self.cfg["algorithm"]["min_lon"]
-            min_lon = -361 if min_lon == 9999 else min_lon
-
-            max_depth = self.cfg["algorithm"]["max_depth"]
-            max_depth = 9999 if max_depth == 9999 else max_depth
-
-            min_depth = self.cfg["algorithm"]["min_depth"]
-            min_depth = -100 if min_depth == 9999 else min_depth
 
             events = self.events
             n0 = len(events)
@@ -1877,6 +1936,7 @@ class InversionIterator(object):
 
         self.synchronize(attrs=['events','arrivals'])
         return True
+
 
     @_utilities.log_errors(logger)
     def check_event_migration(self):
@@ -1943,6 +2003,7 @@ class InversionIterator(object):
         self.synchronize(attrs=['events','arrivals'])
         return len(self.events) > 0
 
+
     @_utilities.log_errors(logger)
     def load_cfg(self):
         """
@@ -1976,12 +2037,23 @@ class InversionIterator(object):
             data = _dataio.parse_event_data(self.argc)
             self.events, self.arrivals = data
 
-            # register the available phase types (why are we doing it like this? TODO review)
+            self.arrival_history = pd.DataFrame({
+                'arrival_id': self.arrivals['arrival_id'],
+                'event_id': self.arrivals['event_id'],
+                f'iter_{self.iiter}': self.arrivals['residual'].abs()
+            })
+
+            self.event_history = pd.DataFrame({
+                'event_id': self.events['event_id'],
+                f'iter_{self.iiter}': self.events['residual'].abs()
+            })
+
+            # register the available phase types also just in case
             phases = self.arrivals["phase"]
             phases = phases.unique()
             self.phases = sorted(phases)
 
-        self.synchronize(attrs=["events", "arrivals", "phases"])
+        self.synchronize(attrs=["events", "arrivals", "event_history", "arrival_history", "phases"])
 
         return True
 
@@ -2042,13 +2114,14 @@ class InversionIterator(object):
 
 
     @_utilities.log_errors(logger)
-    def relocate_events(self, method):
-        if method == "LINEAR":
-            self._relocate_events_linear()
-        elif method == "DE":
-            self._relocate_events_de()
-        else:
-            raise (ValueError("Relocation method must be either 'linear' or 'DE'."))
+    def relocate_events(self, method="DE", weightsonly=False):
+        if not weightsonly:
+            if method == "LINEAR":
+                self._relocate_events_linear()
+            elif method == "DE":
+                self._relocate_events_de()
+            else:
+                raise (ValueError("Relocation method must be either 'linear' or 'DE'"))
 
         # after relocating events, update arrival residuals also
         self.update_arrival_residuals()
@@ -2235,7 +2308,10 @@ class InversionIterator(object):
                 #dphi = np.radians(dlon) 
                 dphi = np.radians(dlon) * np.cos(np.radians(self._model_lat_center)) # better scaled
                 delta = np.array([dz, dtheta, dphi, dt])
-                delta_tele = np.array([.1,.0001,.0001,dt]) #slightly nonzero dlat and dlon. if zero, pykonal can have a tantrum, if too small then ||G|| zero. 1e-4 sort of works TODO
+                # slightly nonzero dlat and dlon for the quasi teleseisms.. within error anyway
+                #   if zero, pykonal can have a tantrum,
+                #     if too small then ||G|| zero. 1e-4 seems to work OK
+                delta_tele = np.array([.1,.0001,.0001,dt])
 
                 events = self.events
                 events = events.set_index("event_id")
@@ -2411,8 +2487,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(f"Dropped {dn} arrivals with stations outside velocity model. {n0-dn} remain.")
 
-            #the extra metadata seems to be causing an issue (RCP /custom)
-            #we can put it back later
+            #the extra metadata seems to be causing an issue (TODO)
             if 'mag' in self.events.keys() and 'sc_eqid' in self.events.keys():
                 self.events.drop(['mag','sc_eqid'],axis=1,inplace=True)
 
@@ -2427,6 +2502,14 @@ class InversionIterator(object):
                 dn = n0 - len(self.events)
                 if dn > 0:
                     logger.info(f"Dropped {dn} events with < {min_narrival} arrivals. {n0-dn} remain.")
+
+                # drop arrivals without events
+                n0 = len(self.arrivals)
+                bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])
+                self.arrivals = self.arrivals[bool_idx]
+                dn = n0 - len(self.arrivals)
+                if dn > 0:
+                    logger.info(f"Dropped {dn} arrivals without associated events. {n0-dn} remain.")
 
             # drop arrivals out of desired distance range
             arrivals   = self.arrivals
@@ -2488,19 +2571,11 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(f"Dropped {dn} arrivals outside of requested lateral range. {n0-dn} remain.")
 
-            # drop arrivals without events
-            n0 = len(self.arrivals)
-            bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])
-            self.arrivals = self.arrivals[bool_idx]
-            dn = n0 - len(self.arrivals)
-            if dn > 0:
-                logger.info(f"Dropped {dn} arrivals without associated events. {n0-dn} remain.")
-
             # drop events without arrivals
             n0 = len(self.events)
             bool_idx = self.events["event_id"].isin(self.arrivals["event_id"])
             self.events = self.events[bool_idx]
-            self.events0 = self.events.copy() #also save a copy of the original to track total drift over time
+            self.events0 = self.events.copy() # also save a copy of the original to track total drift over time
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(f"Dropped {dn} events without associated arrivals. {n0-dn} remain.")
@@ -2665,6 +2740,7 @@ class InversionIterator(object):
 
         return True
 
+
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def save_stations(self):
@@ -2679,6 +2755,7 @@ class InversionIterator(object):
         self.stations.to_hdf(f"{path}.stations.h5", key="stations")
 
         return True
+
 
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
@@ -2739,8 +2816,10 @@ class InversionIterator(object):
         """
         _all = (
             "arrivals",
+            "arrival_history",
             "cfg",
             "events",
+            "event_history",
             "projection_matrix",
             "pwave_model",
             "swave_model",
@@ -2782,7 +2861,8 @@ class InversionIterator(object):
             arrivals = COMM.gather(None, root=ROOT_RANK)
             arrivals = pd.concat(arrivals, ignore_index=True)
 
-            # sometimes NaNs sneak in as residuals, usually if the source or station is near or eclipses model boundary?
+            # sometimes NaNs sneak in as residuals,
+            #  usually if the source or station is near or eclipses model boundary?
             n0 = len(arrivals)
             arrivals = arrivals.dropna(subset=['residual'])
             dn = n0 - len(arrivals)
@@ -2834,6 +2914,7 @@ class InversionIterator(object):
                             station=station,
                             phase=phase,
                             event_id=_arrivals["event_id"].values,
+                            arrival_id=_arrivals["arrival_id"].values,
                             time=arrival_times,
                             residual=residuals
                         )
@@ -3006,7 +3087,11 @@ class InversionIterator(object):
             original_model = _restesting._copy_scalar_field(base_model)  # Make a deep copy
 
             # Create synthetic model and arrivals for both phases, regardless
-            synthetic_model = _restesting._create_checkerboard_model(base_model, horiz_block_size_km, vert_block_size_km, amplitude)
+            synthetic_model = _restesting._create_checkerboard_model(base_model,
+                                                                     horiz_block_size_km,
+                                                                     vert_block_size_km,
+                                                                     amplitude,
+                                                                     vertical_layers=self.cfg["model"]["res_test_layers"])
             logger.debug(f"Synthetic P&S models created with shape: {synthetic_model.values.shape}")
 
             # Replace our model with checkerboard
@@ -3250,6 +3335,7 @@ def dist_deg(lat1, lon1, lat2, lon2):
     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
     return c * _constants.RAD_TO_DEG
 
+
 def dist_km(lat1, lon1, lat2, lon2):
     """
     Vectorized calculation of distance in KILOMETERS.
@@ -3277,6 +3363,7 @@ def dist_km(lat1, lon1, lat2, lon2):
     a = np.minimum(a, 1.0)  # ensure a doesn't exceed 1 due to floating point errors
 
     return _constants.EARTH_RADIUS * 2 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+
 
 #no longer in use
 def eq_angle(eq_distkm,eq_depth):

@@ -72,7 +72,6 @@ def log_errors(logger):
     """
     A decorator to for error logging.
     """
-
     def _decorate_func(func):
         """
         An hidden decorator to permit the logger to be passed in as a
@@ -101,7 +100,6 @@ def root_only(rank, default=True, barrier=True):
     A decorator for functions and methods that only the root rank should
     execute.
     """
-
     def _decorate_func(func):
         """
         An hidden decorator to permit the rank to be passed in as a
@@ -131,7 +129,6 @@ class ArgumentParser(argparse.ArgumentParser):
     """
     A simple subclass to abort all threads if argument parsing fails.
     """
-
     def exit(self, status=0, message=None):
 
         self.print_usage()
@@ -146,7 +143,6 @@ def parse_args():
     """
     Parse and return command line arguments.
     """
-
     stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
     parser = ArgumentParser()
     parser.add_argument(
@@ -244,7 +240,6 @@ def parse_cfg(configuration_file):
     """
     Parse and return contents of the configuration file.
     """
-
     cfg = dict()
     parser = configparser.ConfigParser()
     parser.read(configuration_file)
@@ -346,22 +341,22 @@ def parse_cfg(configuration_file):
     _cfg["max_arrival_residual"] = parser.getfloat(
         "algorithm",
         "max_arrival_residual",
-        fallback=1.0
+        fallback=0.9
     )
     _cfg["max_event_residual"] = parser.getfloat(
         "algorithm",
         "max_event_residual",
-        fallback=1.5
+        fallback=1.3
     )
     _cfg["max_dlat"] = parser.getfloat(
         "algorithm",
         "max_dlat",
-        fallback=1
+        fallback=0.2
     )
     _cfg["max_dlon"] = parser.getfloat(
         "algorithm",
         "max_dlon",
-        fallback=1
+        fallback=0.2
     )
     _cfg["max_ddepth"] = parser.getfloat(
         "algorithm",
@@ -371,32 +366,32 @@ def parse_cfg(configuration_file):
     _cfg["max_dtime"] = parser.getfloat(
         "algorithm",
         "max_dtime",
-        fallback=5
+        fallback=1
     )
     _cfg["max_lat"] = parser.getfloat(
         "algorithm",
         "max_lat",
-        fallback=9999
+        fallback=91
     )
     _cfg["max_lon"] = parser.getfloat(
         "algorithm",
         "max_lon",
-        fallback=9999
+        fallback=361
     )
     _cfg["min_lat"] = parser.getfloat(
         "algorithm",
         "min_lat",
-        fallback=9999
+        fallback=-91
     )
     _cfg["min_lon"] = parser.getfloat(
         "algorithm",
         "min_lon",
-        fallback=9999
+        fallback=-361
     )
     _cfg["min_depth"] = parser.getfloat(
         "algorithm",
         "min_depth",
-        fallback=9999
+        fallback=-999
     )
     _cfg["max_depth"] = parser.getfloat(
         "algorithm",
@@ -422,7 +417,7 @@ def parse_cfg(configuration_file):
     _cfg["maxiter"] = parser.getint(
         "algorithm",
         "maxiter",
-        fallback=10
+        fallback=7
     )
     cfg["algorithm"] = _cfg
 
@@ -464,9 +459,20 @@ def parse_cfg(configuration_file):
     res_test_string = parser.get(
         "model",
         "res_test_size_mag",
-        fallback='80,10,.05'
+        fallback='100,50,.08'
     )
     _cfg["res_test_size_mag"] = [float(x.strip()) for x in res_test_string.split(",")]
+
+    res_test_layers_string = parser.get(
+        "model",
+        "res_test_layers",
+        fallback=None
+    )
+    _cfg["res_test_layers"] = (
+        [float(x.strip()) for x in res_test_layers_string.split(",")]
+        if res_test_layers_string is not None
+        else None
+    )
 
     rerun_restest = parser.get(
         "model",
@@ -485,7 +491,6 @@ def parse_cfg(configuration_file):
     ).upper()
 
     if _cfg["method"] == "LINEAR":
-        # Parse parameters for linearized relocation.
         _cfg["atol"] = parser.getfloat(
             "linearized_relocation",
             "atol"
@@ -507,7 +512,6 @@ def parse_cfg(configuration_file):
             "damp"
         )
     elif _cfg["method"].upper() == "DE":
-        # Parse parameters for DE relocation.
         _cfg["depth_min"] = parser.getfloat(
             "de_relocation",
             "depth_min"
@@ -550,7 +554,6 @@ def write_cfg(argc, cfg):
     """
     Write the execution configuration to disk for later reference.
     """
-
     output_dir = argc.output_dir
 
     parser = configparser.ConfigParser()

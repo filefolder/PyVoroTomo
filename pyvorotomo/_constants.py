@@ -9,6 +9,8 @@ DISPATCH_TRANSMISSION_TAG = 101
 DTYPE_INT                 = np.int64
 DTYPE_REAL                = np.float64
 
+# TODO add magnitude and eqid for better tracking/QC?
+
 EVENT_DTYPES = dict(
     event_id=np.int64,
     latitude=np.float64,
@@ -27,6 +29,7 @@ EVENT_FIELDS = [
 ]
 
 ARRIVAL_DTYPES = dict(
+    arrival_id=np.int64,
     event_id=np.int64,
     network=str,
     station=str,
@@ -35,6 +38,7 @@ ARRIVAL_DTYPES = dict(
     residual=np.float64
 )
 ARRIVAL_FIELDS = [
+    "arrival_id",
     "event_id",
     "network",
     "station",

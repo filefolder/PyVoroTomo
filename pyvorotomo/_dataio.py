@@ -30,13 +30,16 @@ def parse_event_data(argc):
     events = pd.read_hdf(argc.events, key="events")
     arrivals = pd.read_hdf(argc.events, key="arrivals")
 
+    if 'arrival_id' not in arrivals.keys():
+         arrivals['arrival_id'] = range(len(arrivals))
+
     for field in _constants.EVENT_FIELDS:
         if field not in events.columns:
             error = ValueError(
                 f"Input event data must have the following fields: "
                 f"{_constants.EVENT_FIELDS}"
             )
-            raise (error)
+            raise error
 
     for field in _constants.ARRIVAL_FIELDS:
         if field not in arrivals.columns:
@@ -44,9 +47,9 @@ def parse_event_data(argc):
                 f"Input arrival data must have the following fields: "
                 f"{_constants.ARRIVAL_FIELDS}"
             )
-            raise (error)
+            raise error
 
-    return (events, arrivals)
+    return events, arrivals
 
 
 def parse_network_geometry(argc):
@@ -69,7 +72,7 @@ def parse_network_geometry(argc):
     network["depth"] = -network["elevation"]
     network = network.drop(columns=["elevation"])
 
-    return (network)
+    return network
 
 
 def parse_velocity_models(cfg):
@@ -91,12 +94,12 @@ def parse_velocity_models(cfg):
     path = cfg["model"]["initial_swave_path"]
     _swave_model = pykonal.fields.read_hdf(path)
 
-    models  = (pwave_model, swave_model)
-    _models = (_pwave_model, _swave_model)
+    models  = pwave_model, swave_model
+    _models = _pwave_model, _swave_model
     for model, _model in zip(models, _models):
         model.min_coords = _model.min_coords
         model.node_intervals = _model.node_intervals
         model.npts = _model.npts
         model.values = _model.values
 
-    return (pwave_model, swave_model)
+    return pwave_model, swave_model

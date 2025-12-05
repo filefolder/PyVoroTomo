@@ -13,105 +13,62 @@ from . import _utilities
 logger = _utilities.get_logger(f"__main__.{__name__}")
 
 
-def _create_checkerboard_model(base_model, horiz_block_size_km, vert_block_size_km, amplitude):
-    """Create checkerboard pattern in velocity model with separate horizontal and vertical block sizes."""
+def _create_checkerboard_model(base_model, horiz_block_size_km, 
+    vert_block_size_km, amplitude=0.08, vertical_layers=None):
+    """Create smooth checkerboard using cosine functions."""
 
-    logger.info(f"Creating checkerboard with {horiz_block_size_km}km horizontal, {vert_block_size_km}km vertical blocks, {amplitude} amplitude")
+    if not vertical_layers:
+        logger.info(f"Creating smooth checkerboard with {horiz_block_size_km}km horizontal,"
+         f" {vert_block_size_km}km vertical blocks, {amplitude} amplitude")
+    else:
+        logger.info(f"Creating smooth checkerboard with {horiz_block_size_km}km horizontal,"
+         f" {vertical_layers} km vertical blocks, {amplitude} amplitude")
 
-    # Get model bounds
-    min_coords = base_model.min_coords  # [rho_min, theta_min, phi_min]
-    max_coords = base_model.max_coords  # [rho_max, theta_max, phi_max]
-    earth_radius = _constants.EARTH_RADIUS
-
-    # Create new model (this uses the output velocity model as the baseline for the checker.. probably not a good idea unless using a very strong anomaly)
+    min_coords = base_model.min_coords
+    max_coords = base_model.max_coords
     checkerboard_model = _copy_scalar_field(base_model)
     checkerboard_values = base_model.values.copy()
 
-    # Convert block sizes to coordinate units
-    depth_block_km = vert_block_size_km
-    angular_block_rad = horiz_block_size_km / earth_radius  # radians
+    # Convert to wavelengths (full cycle = 2 blocks)
+    depth_wavelength = 2.0 * vert_block_size_km
+    angular_wavelength = 2.0 * horiz_block_size_km / _constants.EARTH_RADIUS
 
-    # Get model dimensions
     nz, ny, nx = base_model.npts
 
-    # Create checkerboard pattern
+    # Calculate the depth range and thickness per index
+    min_rho = min_coords[0]
+    max_rho = min_coords[0] + (nz - 1) * base_model.node_intervals[0]
+    max_depth = _constants.EARTH_RADIUS - min_rho
+    min_depth = _constants.EARTH_RADIUS - max_rho
+
     for iz in range(nz):
         for iy in range(ny):
             for ix in range(nx):
-                rho = min_coords[0] + iz * base_model.node_intervals[0] #rho INCREASES with iz (deepest is iz = 0)
-                theta = min_coords[1] + iy * base_model.node_intervals[1] 
+                rho = min_coords[0] + iz * base_model.node_intervals[0]
+                theta = min_coords[1] + iy * base_model.node_intervals[1]
                 phi = min_coords[2] + ix * base_model.node_intervals[2]
-                
-                depth = earth_radius - rho
-                
-                # Calculate block indices
-                depth_block_idx = int(depth / depth_block_km)
-                theta_block_idx = int((theta - min_coords[1]) / angular_block_rad)
-                phi_block_idx = int((phi - min_coords[2]) / angular_block_rad)
-                
-                # Checkerboard pattern
-                sign = 1 if (depth_block_idx + theta_block_idx + phi_block_idx) % 2 == 0 else -1
-                
-                # Apply perturbation
-                checkerboard_values[iz, iy, ix] *= (1.0 + sign * amplitude)
+                depth = _constants.EARTH_RADIUS - rho
+
+                # Calculate horizontal components (these are fine)
+                theta_component = np.cos(2 * np.pi * (theta - min_coords[1]) / angular_wavelength)
+                phi_component = np.cos(2 * np.pi * (phi - min_coords[2]) / angular_wavelength)
+
+                # Calculate vertical component
+                if vertical_layers is not None:
+                    # Determine which layer this depth falls into
+                    vert_sign = 1
+                    for layer_depth in sorted(vertical_layers):
+                        if depth > layer_depth:
+                            vert_sign *= -1
+                    perturbation = vert_sign * theta_component * phi_component
+                else:
+                    # Use continuous cosine function
+                    vert_component = np.cos(2 * np.pi * depth / depth_wavelength)
+                    perturbation = vert_component * theta_component * phi_component
+
+                checkerboard_values[iz, iy, ix] *= (1.0 + amplitude * perturbation)
 
     checkerboard_model.values = checkerboard_values
-
-    return checkerboard_model
-
-from scipy.ndimage import gaussian_filter
-def _create_checkerboard_model_average(base_model, horiz_block_size_km, vert_block_size_km, amplitude, smoothing_factor=0):
-    """Create checkerboard pattern in velocity model with separate horizontal and vertical block sizes."""
-
-    logger.info(f"Creating checkerboard with {horiz_block_size_km}km horizontal, {vert_block_size_km}km vertical blocks, +/-{amplitude} amplitude")
-    
-    # Get model bounds
-    min_coords = base_model.min_coords  # [rho_min, theta_min, phi_min]
-    max_coords = base_model.max_coords  # [rho_max, theta_max, phi_max]
-    earth_radius = _constants.EARTH_RADIUS
-    
-    # Create new model
-    checkerboard_model = _copy_scalar_field(base_model)
-    checkerboard_values = base_model.values.copy()
-    
-    # Convert block sizes to coordinate units
-    angular_block_rad = horiz_block_size_km / earth_radius  # radians
-    
-    # Get model dimensions
-    nz, ny, nx = base_model.npts
-    
-    # Calculate layer averages for each depth (per iz... but maybe beter to use same thickness as blocks?)
-    layer_averages = np.zeros(nz)
-    for iz in range(nz):
-        layer_averages[iz] = np.mean(base_model.values[iz, :, :])
-    
-    # Create checkerboard pattern
-    for iz in range(nz):
-        for iy in range(ny):
-            for ix in range(nx):
-                rho = min_coords[0] + iz * base_model.node_intervals[0]  # rho INCREASES with iz
-                theta = min_coords[1] + iy * base_model.node_intervals[1] 
-                phi = min_coords[2] + ix * base_model.node_intervals[2]
-                
-                depth = earth_radius - rho
-                
-                # Calculate block indices
-                depth_block_idx = int(depth / vert_block_size_km)
-                theta_block_idx = int((theta - min_coords[1]) / angular_block_rad)
-                phi_block_idx = int((phi - min_coords[2]) / angular_block_rad)
-                
-                # Checkerboard pattern
-                sign = 1 if (depth_block_idx + theta_block_idx + phi_block_idx) % 2 == 0 else -1
-                
-                # Apply perturbation relative to layer average
-                checkerboard_values[iz, iy, ix] = layer_averages[iz] * (1.0 + sign * amplitude)
-    
-    checkerboard_model.values = checkerboard_values
-
-    # Apply smoothing if requested
-    if smoothing_factor > 0:
-        checkerboard_model.values = gaussian_filter(checkerboard_values, sigma=smoothing_factor, radius=5) # radius units are grid points
-
     return checkerboard_model
 
 

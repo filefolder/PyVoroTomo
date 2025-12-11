@@ -459,19 +459,17 @@ def parse_cfg(configuration_file):
     res_test_string = parser.get(
         "model",
         "res_test_size_mag",
-        fallback='100,50,.08'
+        fallback='100,.08'
     )
     _cfg["res_test_size_mag"] = [float(x.strip()) for x in res_test_string.split(",")]
 
     res_test_layers_string = parser.get(
         "model",
         "res_test_layers",
-        fallback=""
+        fallback="10,25,50,70,120,170,230"
     )
     _cfg["res_test_layers"] = (
         [float(x.strip()) for x in res_test_layers_string.split(",")]
-        if res_test_layers_string
-        else ""
     )
 
     rerun_restest = parser.get(

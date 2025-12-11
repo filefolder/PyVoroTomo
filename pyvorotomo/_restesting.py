@@ -13,16 +13,12 @@ from . import _utilities
 logger = _utilities.get_logger(f"__main__.{__name__}")
 
 
-def _create_checkerboard_model(base_model, horiz_block_size_km, 
-    vert_block_size_km, amplitude=0.08, vertical_layers=None):
+def _create_checkerboard_model(base_model, horiz_block_size_km,
+    vertical_layers = [10,25,50,80,150], amplitude=0.08):
     """Create smooth checkerboard using cosine functions."""
 
-    if not vertical_layers:
-        logger.info(f"Creating smooth checkerboard with {horiz_block_size_km}km horizontal,"
-         f" {vert_block_size_km}km vertical blocks, {amplitude} amplitude")
-    else:
-        logger.info(f"Creating smooth checkerboard with {horiz_block_size_km}km horizontal,"
-         f" {vertical_layers} km vertical blocks, {amplitude} amplitude")
+    logger.info(f"Creating checkerboard with {horiz_block_size_km}km horizontal,"
+     f" {vertical_layers}km vertical blocks, {amplitude} amplitude")
 
     min_coords = base_model.min_coords
     max_coords = base_model.max_coords
@@ -30,12 +26,10 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
     checkerboard_values = base_model.values.copy()
 
     # Convert to wavelengths (full cycle = 2 blocks)
-    depth_wavelength = 2.0 * vert_block_size_km
     angular_wavelength = 2.0 * horiz_block_size_km / _constants.EARTH_RADIUS
 
     nz, ny, nx = base_model.npts
 
-    # Calculate the depth range and thickness per index
     min_rho = min_coords[0]
     max_rho = min_coords[0] + (nz - 1) * base_model.node_intervals[0]
     max_depth = _constants.EARTH_RADIUS - min_rho
@@ -49,22 +43,14 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
                 phi = min_coords[2] + ix * base_model.node_intervals[2]
                 depth = _constants.EARTH_RADIUS - rho
 
-                # Calculate horizontal components (these are fine)
                 theta_component = np.cos(2 * np.pi * (theta - min_coords[1]) / angular_wavelength)
                 phi_component = np.cos(2 * np.pi * (phi - min_coords[2]) / angular_wavelength)
 
-                # Calculate vertical component
-                if vertical_layers is not None:
-                    # Determine which layer this depth falls into
-                    vert_sign = 1
-                    for layer_depth in sorted(vertical_layers):
-                        if depth > layer_depth:
-                            vert_sign *= -1
-                    perturbation = vert_sign * theta_component * phi_component
-                else:
-                    # Use continuous cosine function
-                    vert_component = np.cos(2 * np.pi * depth / depth_wavelength)
-                    perturbation = vert_component * theta_component * phi_component
+                vert_sign = 1
+                for layer_depth in sorted(vertical_layers):
+                    if depth > layer_depth:
+                        vert_sign *= -1
+                perturbation = vert_sign * theta_component * phi_component
 
                 checkerboard_values[iz, iy, ix] *= (1.0 + amplitude * perturbation)
 
@@ -312,7 +298,7 @@ def _find_latest_files_new(results_dir):
     return latest_stations, latest_events, latest_pmodel, latest_smodel
 
 
-def _save_results(output_dir, input_model, recovered_model, metrics, phase, horiz_block_size_km, vert_block_size_km,tag=""):
+def _save_results(output_dir, input_model, recovered_model, metrics, phase, horiz_block_size_km,tag=""):
     """Save checkerboard test results."""
 
     suffix = f"_checkerboard_{phase}_{horiz_block_size_km}km"

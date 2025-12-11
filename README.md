@@ -43,11 +43,11 @@ see examples for available options, explanations and recommendations!
 **pyvorotomo**: Module code. The main one you probably want to look at is _iterator.py<br>
 **scripts**: Some tools to generate stations.h5, catalog.h5, and other common tasks (work in progress)<br>
 **synth_data**: Some synthetic data to experiment with<br>
-**test_data**: Some example real-world data<br>
+**real_data**: Some example real-world data<br>
 
 
 ## Citation
-If you make use of this code in published work, please cite the below (more soon hopefully :)
+If you make use of this code in published work, please cite the below (more very soon I expect :)
 
 ## Installation (previous version)
 Refer to [https://github.com/malcolmw/PyVoroTomo/wiki/Installation](https://github.com/malcolmw/PyVoroTomo/wiki/Installation) for both laptops and clusters.

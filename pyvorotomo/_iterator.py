@@ -3043,18 +3043,15 @@ class InversionIterator(object):
 
             # Parse resolution test parameters - fix the parameter name
             test_params = self.cfg["model"]["res_test_size_mag"]
-            horiz_block_size_km = float(test_params[0]) if len(test_params) > 0 else 50.0
-            vert_block_size_km = float(test_params[1]) if len(test_params) > 1 else 20.0
-            amplitude = float(test_params[2]) if len(test_params) > 2 else 0.05
+            horiz_block_size_km = float(test_params[0])
+            amplitude = float(test_params[1])
 
         else:
             horiz_block_size_km = None # yes, these need to be set for the rest of the workers
-            vert_block_size_km = None
             amplitude = None
 
         need_to_load_data = COMM.bcast(need_to_load_data, root=ROOT_RANK)
         horiz_block_size_km = COMM.bcast(horiz_block_size_km, root=ROOT_RANK)
-        vert_block_size_km = COMM.bcast(vert_block_size_km, root=ROOT_RANK)
         amplitude = COMM.bcast(amplitude, root=ROOT_RANK)
 
         self.synchronize(attrs=["pwave_model", "swave_model", "step_size", "arrivals", "phases", "stations"])
@@ -3069,11 +3066,11 @@ class InversionIterator(object):
 
         # run process
         for phase in self.phases:
-            self._run_resolution_test_single_phase(phase, horiz_block_size_km, vert_block_size_km, amplitude)
+            self._run_resolution_test_single_phase(phase, horiz_block_size_km, amplitude)
         return True
 
     @_utilities.log_errors(logger)
-    def _run_resolution_test_single_phase(self, phase, horiz_block_size_km, vert_block_size_km, amplitude):
+    def _run_resolution_test_single_phase(self, phase, horiz_block_size_km, amplitude):
         """
         Run resolution test per phase
         """
@@ -3089,9 +3086,8 @@ class InversionIterator(object):
             # Create synthetic model and arrivals for both phases, regardless
             synthetic_model = _restesting._create_checkerboard_model(base_model,
                                                                      horiz_block_size_km,
-                                                                     vert_block_size_km,
-                                                                     amplitude,
-                                                                     vertical_layers=self.cfg["model"]["res_test_layers"])
+                                                                     vertical_layers=self.cfg["model"]["res_test_layers"],
+                                                                     amplitude=amplitude)
             logger.debug(f"Synthetic P&S models created with shape: {synthetic_model.values.shape}")
 
             # Replace our model with checkerboard
@@ -3167,7 +3163,7 @@ class InversionIterator(object):
             # save results
             _restesting._save_results(
                 self.argc.output_dir, synthetic_model, recovered_model,
-                metrics, phase, horiz_block_size_km, vert_block_size_km
+                metrics, phase, horiz_block_size_km
             )
 
             # restore original arrivals

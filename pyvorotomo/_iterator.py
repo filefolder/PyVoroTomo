@@ -725,7 +725,7 @@ class InversionIterator(object):
             # Initialize cells array
             base_cells = None
 
-            # STEP 1: Generate k-medians cells FIRST (if requested)
+            # Generate k-medians cells FIRST (if requested)
             if kvoronoi > 0:
                 points = self._sample_raypaths(phase)
                 # i can't see it happening, but kvoronoi needs to be less then the len(points)! we might could cap it at 90% or something
@@ -771,7 +771,7 @@ class InversionIterator(object):
                     else:
                         logger.warning(f"Insufficient valid raypath points ({len(points)}) for k-medians clusters")
 
-            # STEP 2: Generate random/adaptive cells for the remainder
+            # Generate random/adaptive cells for the remainder
             n_random = nvoronoi - kvoronoi
             
             if n_random > 0:
@@ -788,7 +788,7 @@ class InversionIterator(object):
                 theta_phi = np.random.rand(n_random, 2) * delta[1:] + min_coords[1:]
                 random_cells = np.hstack([rho, theta_phi])
 
-                # STEP 3: Apply adaptive meshing ONLY to random cells
+                # Apply adaptive meshing ONLY to random cells
                 if adaptive_weight > 0:
                     density_3d, edges = self._estimate_data_density(phase, adaptive_weight)
 
@@ -837,13 +837,13 @@ class InversionIterator(object):
                 # Ensure random cells are within bounds
                 random_cells = np.clip(random_cells, min_coords, max_coords)
 
-                # STEP 4: Combine k-medians cells (first) with random/adaptive cells (after)
+                # SCombine k-medians cells (first) with random/adaptive cells (after)
                 if base_cells is not None:
                     base_cells = np.vstack([base_cells, random_cells])
                 else:
                     base_cells = random_cells
 
-            # STEP 5: Remove cells that are too close together
+            # Remove cells that are too close together
             if self.cfg["algorithm"].get("remove_close_cells", True):
                 min_distance_rad = float(self.cfg["algorithm"]["min_dist"]) / 6371. * 2 # so smallest size is 2x mindist
                 original_count = len(base_cells)
@@ -851,7 +851,7 @@ class InversionIterator(object):
                 tree = cKDTree(base_cells)
                 close_pairs = tree.query_pairs(min_distance_rad)
 
-                # Important: preserve k-medians cells preferentially
+                # Preserve k-medians cells preferentially
                 to_remove = set()
                 for i, j in close_pairs:
                     # If one is a k-medians cell and the other isn't, remove the random one
@@ -873,7 +873,7 @@ class InversionIterator(object):
 
             self.voronoi_cells = base_cells
             
-            # Print diagnostics
+            # Diagnostics
             cell_widths_km = self._estimate_voronoi_cell_widths_simple(base_cells)
             n_rays = len(self.sampled_arrivals)
             n_cells = len(self.voronoi_cells)
@@ -882,9 +882,9 @@ class InversionIterator(object):
             logger.info(f"Cell count: {n_cells} ({kvoronoi} k-medians, {n_cells-kvoronoi} random/adaptive, {len(points)} points)")
             logger.info(f"Average horizontal cell width: {cell_widths_km:.1f} km & rays per cell: {rays_per_cell:.1f}")
 
-            if rays_per_cell < self.cfg["algorithm"]["min_rays_per_cell"]:
+            if rays_per_cell < 0.7 * self.cfg["algorithm"]["min_rays_per_cell"]:
                 logger.warning(f"Low ray density! Consider reducing nvoronoi and/or increasing events & arrivals")
-            elif rays_per_cell > 3 * self.cfg["algorithm"]["min_rays_per_cell"]:
+            elif rays_per_cell > 4 * self.cfg["algorithm"]["min_rays_per_cell"]:
                 logger.info(f"High ray density! - Could increase nvoronoi for better resolution")
 
         self.synchronize(attrs=["voronoi_cells"])
@@ -1847,8 +1847,6 @@ class InversionIterator(object):
         for phase in phase_order:
             logger.info(f" >>> Starting {phase}-wave iteration {self.iiter}/{niter} <<<")
 
-            if self.cfg["argc"]["relocate_first"]=="False" and self.iiter == 1: # nb relocate_first arg is a string, not bool
-                self.update_arrival_weights(phase)
             self._reset_realization_stack(phase)
 
             for self.ireal in range(nreal):
@@ -2119,7 +2117,7 @@ class InversionIterator(object):
             if method == "LINEAR":
                 self._relocate_events_linear()
             elif method == "DE":
-                self._relocate_events_de()
+                self._relocate_events_de() #########< what about this adds the event_latitude rename
             else:
                 raise (ValueError("Relocation method must be either 'linear' or 'DE'"))
 
@@ -2345,7 +2343,7 @@ class InversionIterator(object):
                         if len(_arrivals) == 1:
                             # only let the teleseisms shift via time dimension since 1D (seems to be sensitive to the value. 1e-4 works)
                             loc = locator.locate(initial, delta_tele)
-                            logger.info("locating TELESEISM")
+                            logger.debug("locating TELESEISM")
                         else:
                             loc = locator.locate(initial, delta)
 

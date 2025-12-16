@@ -93,20 +93,21 @@ def _extract_recovered_model(iterator, phase):
     
     return recovered_model
 
+# this needs work
 def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model):
     """Analyze checkerboard resolution test results with more appropriate metrics."""
-    
+
     # Calculate perturbations
     input_pert = (input_model.values / ref_model.values) - 1.0
     recovered_pert = (recovered_model.values / ref_model.values) - 1.0
-    
-    # First, get the ray coverage mask - cells that actually have rays
+
+    # get the ray coverage mask - cells that actually have rays
     coverage_mask = _create_voronoi_coverage_mask(iterator, input_model, phase)
     # NaNs too
     nan_mask = ~(np.isnan(recovered_pert) | np.isnan(input_pert))
     coverage_mask = coverage_mask & nan_mask
-    
-    # Optional: exclude extreme boundaries (but this should be secondary to coverage)
+
+    # exclude extreme boundaries
     shape = input_pert.shape
     margin = 1  # Minimal margin since coverage mask is primary
     boundary_mask = np.ones(shape, dtype=bool)
@@ -116,28 +117,26 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
     boundary_mask[:, -margin:, :] = False
     boundary_mask[:, :, :margin] = False
     boundary_mask[:, :, -margin:] = False
-    
+
     # Also require some minimum absolute perturbation
     signal_threshold = 0.001
     significant_input = np.abs(input_pert) > signal_threshold
-    
+
     # Combine all masks - most importantly the coverage mask
     analysis_mask = coverage_mask & boundary_mask & significant_input
-    
+
     # Also track cells that should have signal but got masked by coverage
     no_coverage_but_perturbed = significant_input & (~coverage_mask)
     n_no_coverage = np.sum(no_coverage_but_perturbed)
     if n_no_coverage > 0:
         logger.warning(f"{n_no_coverage} cells have checkerboard perturbations but no ray coverage")
-    
+
     masked_input = input_pert[analysis_mask]
     masked_recovered = recovered_pert[analysis_mask]
-    
+
     if len(masked_input) == 0:
         logger.warning("No valid regions found for resolution analysis")
         return _empty_metrics(phase, len(input_pert.flatten()))
-    
-    # More appropriate metrics for tomography
     
     # 1. Pattern correlation (handles spatial shifts better)
     correlation = np.corrcoef(masked_input.flatten(), masked_recovered.flatten())[0,1] #why is this negative?
@@ -146,11 +145,11 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
     rms_input = np.sqrt(np.mean(masked_input**2))
     rms_recovered = np.sqrt(np.mean(masked_recovered**2))
     amplitude_ratio = rms_recovered / rms_input if rms_input > 0 else 0
-    
+
     # 3. Sign recovery (polarity test) - more forgiving
     correct_polarity = np.sign(masked_recovered) == np.sign(masked_input)
     polarity_recovery = np.sum(correct_polarity) / len(correct_polarity)
-    
+
     # 4. Relaxed amplitude recovery test
     recovery_ratio = np.abs(masked_recovered) / (np.abs(masked_input) + 1e-10)
     well_recovered_relaxed = (
@@ -158,17 +157,17 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
         (np.sign(masked_recovered) == np.sign(masked_input))
     )
     well_resolved_fraction = np.sum(well_recovered_relaxed) / len(well_recovered_relaxed)
-    
+
     # 5. Variance reduction (how much pattern variance is explained)
     input_var = np.var(masked_input)
     residual_var = np.var(masked_input - masked_recovered)
     variance_reduction = 1 - (residual_var / input_var) if input_var > 0 else 0 #why is this negative?
-    
+
     # Add coverage statistics
     n_coverage = np.sum(coverage_mask)
     n_analysis = np.sum(analysis_mask)
     coverage_fraction = n_coverage / len(input_pert.flatten())
-    
+
     metrics = {
         'phase': phase,
         'correlation': float(correlation),
@@ -183,7 +182,7 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
         'analysis_nodes': int(n_analysis),
         'coverage_fraction': float(coverage_fraction)
     }
-    
+
     logger.info(f"Checkerboard resolution results for {phase}:")
     logger.info(f"  Ray coverage: {n_coverage}/{len(input_pert.flatten())} nodes ({coverage_fraction:.1%})")
     logger.info(f"  Analysis coverage: {n_analysis}/{n_coverage} of covered nodes")
@@ -192,24 +191,25 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
     logger.info(f"  Polarity recovery: {polarity_recovery:.3f}")
     logger.info(f"  Well-resolved fraction: {well_resolved_fraction:.3f}")
     logger.info(f"  Variance explained: {variance_reduction:.3f}")
-    
+
     return metrics
+
 
 def _create_voronoi_coverage_mask(iterator, model, phase):
     """Create mask for areas covered by well-sampled Voronoi cells."""
-    
+
     min_rays = iterator.cfg["algorithm"]["min_rays_per_cell"]
-    
+
     if iterator.sensitivity_matrix is None:
         logger.warning("No sensitivity matrix available for Voronoi masking")
         return np.ones(model.npts, dtype=bool)
-    
+
     # Get ray counts per Voronoi cell
     nvoronoi = len(iterator.voronoi_cells)
     sensitivity_voronoi = iterator.sensitivity_matrix.tocsr()[:len(iterator.residuals), :nvoronoi]
     sensitivity_coo = sensitivity_voronoi.tocoo()
     ray_counts = np.bincount(sensitivity_coo.col, minlength=nvoronoi)
-    
+
     valid_cells = ray_counts >= min_rays
 
     if iterator.projection_matrix is None:
@@ -230,6 +230,7 @@ def _create_voronoi_coverage_mask(iterator, model, phase):
     logger.info(f"Voronoi mask covers {np.sum(node_mask)}/{np.prod(model.npts)} model nodes")
 
     return node_mask
+
 
 def _find_latest_files(results_dir):
     """Find latest iteration files in results directory."""
@@ -262,6 +263,7 @@ def _find_latest_files(results_dir):
     logger.info(f"  S-model: {latest_smodel}")
 
     return latest_events, latest_pmodel, latest_smodel
+
 
 def _find_latest_files_new(results_dir):
     """Find latest iteration files in results directory."""
@@ -313,6 +315,7 @@ def _save_results(output_dir, input_model, recovered_model, metrics, phase, hori
 
     logger.info(f"Checkerboard results saved with suffix: {suffix}")
 
+
 def _empty_metrics(phase, total_nodes):
     """Return empty metrics when no coverage found."""
     return {
@@ -325,6 +328,7 @@ def _empty_metrics(phase, total_nodes):
         'total_nodes': total_nodes,
         'voronoi_nodes': 0
     }
+
 
 def _copy_scalar_field(field):
     """
@@ -346,4 +350,3 @@ def _copy_scalar_field(field):
     new_field.npts = field.npts.copy()
     new_field.values = field.values.copy()
     return new_field
-

@@ -1,10 +1,3 @@
-"""
-A module for monkey-patching the pickle protocol for Cython classes.
-
-.. author:: Malcolm C. A. White
-.. date:: 2020-04-17
-"""
-
 import pykonal
 
 class ScalarField3D(pykonal.fields.ScalarField3D):

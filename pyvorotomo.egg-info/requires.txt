@@ -1,0 +1,7 @@
+KDEpy>=1.1.12
+mpi4py>=4.0
+numpy>=1.24.0
+pandas
+pykonal>=0.2.3b4
+tables
+scipy>=1.16

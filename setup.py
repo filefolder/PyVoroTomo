@@ -8,21 +8,21 @@ from setuptools import setup
 
 
 # Package meta-data.
-name            = "pyvorotomo"
+name            = "pyvorotomo v2"
 description     = "Parsimonious Voronoi-cell based tomograph (Fang et al., 2019)"
 url             = "https://github.com/malcolmw/PyVoroTomo"
 email           = "malcolm.white@.usc.edu"
 author          = "Hongjian Fang and Malcolm C. A. White and Robert Pickle"
-requires_python = ">=3.9"
+requires_python = ">=3.10"
 packages        = ["pyvorotomo"]
 required        = [
     "KDEpy>=1.1.12",
     "mpi4py>=4.0",
-    "numpy>=1.24.0",
+    "numpy>=2.4.0",
     "pandas",
-    "pykonal>=0.2.3b4",
+    "pykonal>=0.5.0",
     "tables",
-    "scipy>=1.16"
+    "scipy>=1.16.0"
 ]
 scripts         = ["bin/pyvorotomo"]
 license         = "GNU GPLv3"
@@ -56,7 +56,7 @@ setup(
         "Operating System :: POSIX :: Linux",
         "Programming Language :: Python",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: Implementation :: CPython",
         "Topic :: Scientific/Engineering :: Physics"
     ]

@@ -13,12 +13,21 @@ from . import _utilities
 logger = _utilities.get_logger(f"__main__.{__name__}")
 
 
+from scipy.ndimage import convolve1d
 def _create_checkerboard_model(base_model, horiz_block_size_km,
     vertical_layers = [10,25,50,80,150], amplitude=0.08):
-    """Create smooth checkerboard using cosine functions."""
+    """
+    Create smooth checkerboard using cosine smoothing in horizontal,
+    Hann windows (length 3*dz) in vertical. Flips vertical polarity
+    at user defined levels (force users to decide!)
+    """
+
+    # Hardwire vertical smoothing
+    dz = base_model.node_intervals[0] 
+    vertical_smooth_km = 3 * dz  # turns OFF at 1 * dz
 
     logger.info(f"Creating checkerboard with {horiz_block_size_km}km horizontal,"
-     f" {vertical_layers}km vertical blocks, {amplitude} amplitude")
+     f" {vertical_layers}km vertical blocks, {vertical_smooth_km:.1f}km vertical smoothing, {amplitude} amplitude   ###")
 
     min_coords = base_model.min_coords
     max_coords = base_model.max_coords
@@ -26,32 +35,48 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
     checkerboard_values = base_model.values.copy()
 
     # Convert to wavelengths (full cycle = 2 blocks)
-    angular_wavelength = 2.0 * horiz_block_size_km / _constants.EARTH_RADIUS
-
+    angular_wavelength = 2 * horiz_block_size_km / _constants.EARTH_RADIUS
     nz, ny, nx = base_model.npts
-
     min_rho = min_coords[0]
     max_rho = min_coords[0] + (nz - 1) * base_model.node_intervals[0]
     max_depth = _constants.EARTH_RADIUS - min_rho
     min_depth = _constants.EARTH_RADIUS - max_rho
 
+    sorted_layers = sorted(vertical_layers)
+
+    # Create the vertical sign pattern (1D array)
+    depth_array = _constants.EARTH_RADIUS - (min_coords[0] + np.arange(nz) * base_model.node_intervals[0])
+    vert_sign_array = np.ones(nz)
+    for i, depth in enumerate(depth_array):
+        n_layers_crossed = sum(1 for layer_depth in sorted_layers if depth > layer_depth)
+        vert_sign_array[i] = (-1) ** n_layers_crossed
+
+    # Apply vertical smoothing using convolution
+    n_smooth_cells = int(vertical_smooth_km / dz)
+    if n_smooth_cells > 1:
+        # Create smoothing kernel (Hann window)
+        kernel_size = 2 * n_smooth_cells + 1
+        kernel = np.hanning(kernel_size)
+        kernel = kernel / kernel.sum()
+
+        # & Smoooooth
+        vert_sign_array = convolve1d(vert_sign_array, kernel, mode='nearest')
+
+    # Now build full CB model
     for iz in range(nz):
         for iy in range(ny):
             for ix in range(nx):
-                rho = min_coords[0] + iz * base_model.node_intervals[0]
                 theta = min_coords[1] + iy * base_model.node_intervals[1]
                 phi = min_coords[2] + ix * base_model.node_intervals[2]
-                depth = _constants.EARTH_RADIUS - rho
 
+                # Smooth horizontal components
                 theta_component = np.cos(2 * np.pi * (theta - min_coords[1]) / angular_wavelength)
                 phi_component = np.cos(2 * np.pi * (phi - min_coords[2]) / angular_wavelength)
 
-                vert_sign = 1
-                for layer_depth in sorted(vertical_layers):
-                    if depth > layer_depth:
-                        vert_sign *= -1
-                perturbation = vert_sign * theta_component * phi_component
+                # Use pre-smoothed vertical component
+                vert_component = vert_sign_array[iz]
 
+                perturbation = vert_component * theta_component * phi_component
                 checkerboard_values[iz, iy, ix] *= (1.0 + amplitude * perturbation)
 
     checkerboard_model.values = checkerboard_values
@@ -59,7 +84,7 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
 
 
 def _extract_recovered_model(iterator, phase):
-    """Extract recovered model from inversion results."""
+    """ Extract recovered model from inversion results """
     
     if phase == 'P':
         final_model = iterator.pwave_model
@@ -81,7 +106,7 @@ def _extract_recovered_model(iterator, phase):
     n_valid = np.sum(voronoi_mask)
     n_total = np.prod(final_model.values.shape)
     
-    logger.info(f"Voronoi mask covers {n_valid}/{n_total} nodes ({n_valid/n_total*100:.1f}%)")
+    logger.info(f"Voronoi mask covers {n_valid}/{n_total} nodes ({n_valid/n_total*100:.1f}%)   ###")
     
     if n_valid > 0:
         valid_values = masked_values[voronoi_mask]
@@ -89,7 +114,7 @@ def _extract_recovered_model(iterator, phase):
     else:
         logger.warning("No valid nodes after Voronoi masking")
     
-    logger.info(f"Final model velocity range: {final_model.values.min():.2f} to {final_model.values.max():.2f}")
+    logger.info(f"Final model velocity range: {final_model.values.min():.2f} to {final_model.values.max():.2f}   ###")
     
     return recovered_model
 
@@ -119,7 +144,7 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
     boundary_mask[:, :, -margin:] = False
 
     # Also require some minimum absolute perturbation
-    signal_threshold = 0.001
+    signal_threshold = 0.01
     significant_input = np.abs(input_pert) > signal_threshold
 
     # Combine all masks - most importantly the coverage mask
@@ -136,21 +161,30 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
 
     if len(masked_input) == 0:
         logger.warning("No valid regions found for resolution analysis")
-        return _empty_metrics(phase, len(input_pert.flatten()))
+        return {
+            'phase': phase,
+            'correlation': 0,
+            'amplitude_ratio': 0,
+            'rms_input': 0,
+            'rms_recovered': 0,
+            'well_resolved_fraction': 0,
+            'total_nodes': len(input_pert.flatten()),
+            'voronoi_nodes': 0
+            }
     
-    # 1. Pattern correlation (handles spatial shifts better)
-    correlation = np.corrcoef(masked_input.flatten(), masked_recovered.flatten())[0,1] #why is this negative?
+    # Pattern correlation (handles spatial shifts better)
+    correlation = np.corrcoef(masked_input.flatten(), masked_recovered.flatten())[0,1]
     
-    # 2. RMS amplitude recovery
+    # RMS amplitude recovery
     rms_input = np.sqrt(np.mean(masked_input**2))
     rms_recovered = np.sqrt(np.mean(masked_recovered**2))
     amplitude_ratio = rms_recovered / rms_input if rms_input > 0 else 0
 
-    # 3. Sign recovery (polarity test) - more forgiving
+    # Sign recovery (polarity test)
     correct_polarity = np.sign(masked_recovered) == np.sign(masked_input)
     polarity_recovery = np.sum(correct_polarity) / len(correct_polarity)
 
-    # 4. Relaxed amplitude recovery test
+    # Relaxed amplitude recovery test
     recovery_ratio = np.abs(masked_recovered) / (np.abs(masked_input) + 1e-10)
     well_recovered_relaxed = (
         (recovery_ratio > 0.15) &  # Only 15% amplitude recovery required
@@ -158,10 +192,10 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
     )
     well_resolved_fraction = np.sum(well_recovered_relaxed) / len(well_recovered_relaxed)
 
-    # 5. Variance reduction (how much pattern variance is explained)
+    # Variance reduction (how much pattern variance is explained)
     input_var = np.var(masked_input)
     residual_var = np.var(masked_input - masked_recovered)
-    variance_reduction = 1 - (residual_var / input_var) if input_var > 0 else 0 #why is this negative?
+    variance_reduction = 1 - (residual_var / input_var) if input_var > 0 else 0
 
     # Add coverage statistics
     n_coverage = np.sum(coverage_mask)
@@ -183,20 +217,20 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
         'coverage_fraction': float(coverage_fraction)
     }
 
-    logger.info(f"Checkerboard resolution results for {phase}:")
-    logger.info(f"  Ray coverage: {n_coverage}/{len(input_pert.flatten())} nodes ({coverage_fraction:.1%})")
-    logger.info(f"  Analysis coverage: {n_analysis}/{n_coverage} of covered nodes")
-    logger.info(f"  Pattern correlation: {correlation:.3f}")
-    logger.info(f"  Amplitude recovery: {amplitude_ratio:.3f}")
-    logger.info(f"  Polarity recovery: {polarity_recovery:.3f}")
-    logger.info(f"  Well-resolved fraction: {well_resolved_fraction:.3f}")
-    logger.info(f"  Variance explained: {variance_reduction:.3f}")
+    logger.info(f"Checkerboard resolution results for {phase}:   ###")
+    logger.info(f"  Ray coverage: {n_coverage}/{len(input_pert.flatten())} nodes ({coverage_fraction:.1%})   ###")
+    logger.info(f"  Analysis coverage: {n_analysis}/{n_coverage} of covered nodes   ###")
+    logger.info(f"  Pattern correlation: {correlation:.3f}   ###")
+    logger.info(f"  Amplitude recovery: {amplitude_ratio:.3f}   ###")
+    logger.info(f"  Polarity recovery: {polarity_recovery:.3f}   ###")
+    logger.info(f"  Well-resolved fraction: {well_resolved_fraction:.3f}   ###")
+    logger.info(f"  Variance explained: {variance_reduction:.3f}   ###")
 
     return metrics
 
 
 def _create_voronoi_coverage_mask(iterator, model, phase):
-    """Create mask for areas covered by well-sampled Voronoi cells."""
+    """Create mask for areas covered by well-sampled Voronoi cells"""
 
     min_rays = iterator.cfg["algorithm"]["min_rays_per_cell"]
 
@@ -265,8 +299,9 @@ def _find_latest_files(results_dir):
     return latest_events, latest_pmodel, latest_smodel
 
 
+# this one includes stations (not yet in use though)
 def _find_latest_files_new(results_dir):
-    """Find latest iteration files in results directory."""
+    """Find latest iteration files in results directory"""
     event_files = glob.glob(os.path.join(results_dir, "*.events.h5"))
     if not event_files:
         return None, None, None, None
@@ -301,7 +336,7 @@ def _find_latest_files_new(results_dir):
 
 
 def _save_results(output_dir, input_model, recovered_model, metrics, phase, horiz_block_size_km,tag=""):
-    """Save checkerboard test results."""
+    """Save checkerboard test results"""
 
     suffix = f"_checkerboard_{phase}_{horiz_block_size_km}km"
     if tag:
@@ -316,23 +351,9 @@ def _save_results(output_dir, input_model, recovered_model, metrics, phase, hori
     logger.info(f"Checkerboard results saved with suffix: {suffix}")
 
 
-def _empty_metrics(phase, total_nodes):
-    """Return empty metrics when no coverage found."""
-    return {
-        'phase': phase,
-        'correlation': 0,
-        'amplitude_ratio': 0,
-        'rms_input': 0,
-        'rms_recovered': 0,
-        'well_resolved_fraction': 0,
-        'total_nodes': total_nodes,
-        'voronoi_nodes': 0
-    }
-
-
 def _copy_scalar_field(field):
     """
-    Create a DEEP copy of a ScalarField3D object.
+    Create a DEEP copy of a ScalarField3D object
 
     Parameters:
     -----------
@@ -346,7 +367,7 @@ def _copy_scalar_field(field):
     """
     new_field = _picklabel.ScalarField3D(coord_sys=field.coord_sys)
     new_field.min_coords = field.min_coords.copy()
-    new_field.node_intervals = field.node_intervals.copy() 
+    new_field.node_intervals = field.node_intervals.copy()
     new_field.npts = field.npts.copy()
     new_field.values = field.values.copy()
     return new_field

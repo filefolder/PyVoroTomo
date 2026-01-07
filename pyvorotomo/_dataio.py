@@ -1,10 +1,3 @@
-"""
-A module defining basic I/O functions.
-
-.. author:: Malcolm C. A. White
-.. date:: 2020-04-17
-"""
-
 import numpy as np
 import pandas as pd
 import pykonal
@@ -12,26 +5,36 @@ import pykonal
 from . import _constants
 from . import _picklabel
 
-def parse_event_data(argc):
+def parse_event_data(cfg):
     """
-    Parse and return event data (origins and phases) specified on the
-    command line.
+    Parse and return event data (origins and phases) specified in the
+    config file.
 
     Data are returned as a two-tuple of pandas.DataFrame objects. The
     first entry is the origin data and the second is the phase data.
 
     The input file is expected to be a HDF5 file readable using
     pandas.HDFStore. The input file should have two tables: "events"
-    and "arrivals". The "events" table needs to have "latitude",
-    "longitude", "depth", "time", and "event_id" columns. The "arrivals"
-    table needs to have "network", "station", "phase", "time", and
-    "event_id" columns.
+    and "arrivals".
+
+    The "events" table needs to have "latitude",
+    "longitude", "depth", "time", "event_id", and "source_id" columns.
+    If source_id is not present, we make a generic one.
+
+    The "arrivals" table needs to have "network", "station", "phase",
+    "time", and "event_id" columns.
     """
-    events = pd.read_hdf(argc.events, key="events")
-    arrivals = pd.read_hdf(argc.events, key="arrivals")
+
+    path = cfg["model"]["events_path"]
+
+    events = pd.read_hdf(path, key="events")
+    arrivals = pd.read_hdf(path, key="arrivals")
 
     if 'arrival_id' not in arrivals.keys():
-         arrivals['arrival_id'] = range(len(arrivals))
+        arrivals['arrival_id'] = range(len(arrivals))
+
+    if 'source_id' not in events.keys():
+        events['source_id'] = "event_" + events['event_id'].astype(str).str.zfill(6)
 
     for field in _constants.EVENT_FIELDS:
         if field not in events.columns:
@@ -51,11 +54,11 @@ def parse_event_data(argc):
 
     return events, arrivals
 
-
-def parse_network_geometry(argc):
+# TODO rename this to "stations" ?
+def parse_network_geometry(cfg):
     """
-    Parse and return network-geometry file specified on the
-    command line.
+    Parse and return network-geometry file specified in the
+    config file.
 
     Data are returned as a pandas.DataFrame object.
 
@@ -68,8 +71,10 @@ def parse_network_geometry(argc):
     columns.
     """
 
-    network = pd.read_hdf(argc.network, key="stations")
-    network["depth"] = -network["elevation"]
+    path = cfg["model"]["stations_path"]
+
+    network = pd.read_hdf(path, key="stations")
+    network["depth"] = -network["elevation"] # TODO make this a bit more flexible
     network = network.drop(columns=["elevation"])
 
     return network

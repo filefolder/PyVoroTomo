@@ -1,18 +1,34 @@
+V2.0.1
+- Move some CLI arguments to config file (breaking change!)
+- Require PyKonal 0.5 (non-standard; see below)
+- Added an expanded test dataset (now with both phases!) for original SoCal example
+- update model: Set stack statistics to be mix of mean/median (still experimenting)
+- Adaptive meshing: Add config parameter to weigh raypath density vs horizontal gradient
+- Countless minor edits I can't remember
+- Starting to pay better attention to changelog
+
 V2.0.0
-- Added automatic "checkerboard" resolution testing at arbitrary depth
-- Added ability to perform joint teleseismic inversions also
+- Added automatic "checkerboard" model generation & resolution testing
+- Added ability to perform joint teleseismic inversions
+- Added adaptive meshing 
+- Added "source_id" to events to track for external QC- poor performing events/arrivals automatically removed and logged
 - Expand parameter features & abilities
 - Expanded LSMR information and iterative solution logging
-- Automatic LSMR damping calculator
-- Track individual arrival/events progress for QC 
+- Automatic LSMR damping calculator 
 - Interpret model variance in km/s
 - Handle water/land velocity model boundaries better
-- Added adaptive meshing (experimental)
 - Added flexibility with restarting or skipping phases
-- Additional QC to remove bad events/arrivals
-- Various speed improvements & updated dependencies
+- Additional QC to track and remove bad events/arrivals
 - New plotting and catalog generation scripts
-- Synthetic test datasets
+- Added synthetic test datasets & scripts
+- Various speed improvements & updated dependencies
 
-- (Tweaks to pykonal also...) 
+*** 
+
+PyKonal (0.5.0) - https://github.com/filefolder/pykonal_0.5
+Note that PyVoroTomo >= 2.0.0 requires PyKonal 0.5
+
+- numpy 2.0 infinity bug
+- few other saftey catches, glitch fixes, and speedups I have found useful for PyVoroTomo
+
 

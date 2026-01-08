@@ -8,7 +8,7 @@ from setuptools import setup
 
 
 # Package meta-data.
-name            = "pyvorotomo v2"
+name            = "pyvorotomo"
 description     = "Parsimonious Voronoi-cell based tomograph (Fang et al., 2019)"
 url             = "https://github.com/malcolmw/PyVoroTomo"
 email           = "malcolm.white@.usc.edu"

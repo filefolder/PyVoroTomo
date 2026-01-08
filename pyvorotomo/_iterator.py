@@ -3091,8 +3091,11 @@ class InversionIterator(object):
             # Binned median (marginally better)
             delta_slowness_median = np.ma.median(clipped, axis=0)
 
-            # Take average of the two? May ultimately be the best compromise
-            delta_slowness = (delta_slowness_mean + delta_slowness_median) / 2
+            # Take average of the two? Seems to generate in some "spotty" results
+            #delta_slowness = (delta_slowness_mean + delta_slowness_median) / 2
+
+            # Just the median is probably the most robust (as originally coded!)
+            delta_slowness = delta_slowness_median
 
             # Use KDE? Kinda stinks / time consuming
             #delta_slowness = _utilities.kde_stack(stack, bw_method='scott')
@@ -3169,6 +3172,13 @@ class InversionIterator(object):
                 # Load events and arrivals
                 self.events = pd.read_hdf(events_path, key='events')
                 self.arrivals = pd.read_hdf(events_path, key='arrivals')
+
+                # Not really needed if ONLY running resolution test but code complains elsewhere
+                if 'arrival_id' not in self.arrivals.keys():
+                    self.arrivals['arrival_id'] = range(len(self.arrivals))
+
+                if 'source_id' not in self.events.keys():
+                    self.events['source_id'] = "event_" + self.events['event_id'].astype(str).str.zfill(6)
 
                 # Load velocity models using the same method as main loading
                 _pwave_model = pykonal.fields.read_hdf(pmodel_path)

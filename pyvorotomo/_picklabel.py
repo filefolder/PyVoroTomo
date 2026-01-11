@@ -2,9 +2,7 @@ import pykonal
 
 class ScalarField3D(pykonal.fields.ScalarField3D):
     def __reduce__(self):
-        """
-        Magic method to support pickling.
-        """
+        """ Magic method to support pickling """
 
         state = (
             self.coord_sys,

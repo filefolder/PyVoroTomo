@@ -65,6 +65,7 @@ class InversionIterator(object):
         self._gradient_magnitude = None
         self._grid_coords = None
         self._residuals = None
+        self._residual_weights = None
         self._sensitivity_matrix = None
         self._stations = None
         self._step_size = None
@@ -253,6 +254,15 @@ class InversionIterator(object):
         self._residuals = value
 
     @property
+    def residual_weights(self):
+        """Weights applied to arrivals based on residual magnitude"""
+        return self._residual_weights
+
+    @residual_weights.setter
+    def residual_weights(self, value):
+        self._residual_weights = value
+
+    @property
     def gradient_magnitude(self):
         return self._gradient_magnitude
 
@@ -374,16 +384,50 @@ class InversionIterator(object):
     def voronoi_cells(self, value):
         self._voronoi_cells = value
 
+    # # # # # # END PROPERTY INITS
+
+    def _get_weight_blend(self):
+        """
+        Calculate solver weighting blend factor based on current iteration.
+
+        Returns blend factor in [0, 1]:
+            - 0.0 = no weighting (uniform weights)
+            - 1.0 = full weighting
+
+        Linearly interpolates from robust_weight_start to robust_weight_end
+        over the course of iterations.
+        """
+        niter = self.cfg["algorithm"]["niter"]
+
+        # Get config params with defaults (0 = disabled by default)
+        start_blend = self.cfg["algorithm"].get("solver_weight_start", 0.0)
+        end_blend = self.cfg["algorithm"].get("solver_weight_end", 0.8)
+
+        if niter <= 1 or self.iiter < 1:
+            return start_blend
+        if end_blend <= 0:
+            return 0
+
+        # Linear ramp: 0 at iter 1, 1 at final iter
+        progress = (self.iiter - 1) / (niter - 1)
+
+        # Try SQRT scaling so it ramps up a bit faster at the start
+        progress = np.sqrt(np.clip(progress,0,1))
+
+        blend = start_blend + progress * (end_blend - start_blend)
+
+        return np.clip(blend, 0.0, 1.0)
+
+
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
-    def _compute_model_update(self, phase, min_rays=3):
+    def _compute_model_update(self, phase, min_rays=3, use_weights=True):
         """
         Compute the model update for a single realization and appends
         the results to the realization stack.
         Only the root rank performs this operation.
         """
         logger.debug(f"Computing {phase}-wave model update")
-
 
         if phase == "P":
             model = self.pwave_model
@@ -404,78 +448,92 @@ class InversionIterator(object):
         ray_counts = np.bincount(sensitivity_coo.col, minlength=nvoronoi)
         valid_cells = (ray_counts >= min_rays)
 
-        # Attempt adaptive damping if set to -1
+        # NEW: Apply residual-based weighting
+        solver_weight_method = self.cfg["algorithm"].get("solver_weight_method", "huber")
+        solver_weight_tuning = self.cfg["algorithm"].get("solver_weight_tuning", -1)
+        solver_weight_blend_factor = self._get_weight_blend()
+
+        if use_weights and solver_weight_blend_factor > 0:
+            # Compute robust weights
+            raw_weights = _utilities.compute_residual_weights(
+                self.residuals, 
+                method=solver_weight_method, 
+                tuning_param=solver_weight_tuning
+            )
+
+            # Blend with uniform weights
+            weights = _utilities.blend_weights(raw_weights, solver_weight_blend_factor)
+            self.residual_weights = weights
+
+            # Log statistics
+            n_downweighted = np.sum(weights < 0.75)
+            min_weight = np.min(weights)
+            mean_weight = np.mean(weights)
+            std_weight = np.std(weights)
+            logger.info(f" Arrival weighting: blend: {solver_weight_blend_factor:.2f}, mean(std): {mean_weight:.2f} ({std_weight:.2f}), min: {min_weight:.3f}, "
+                f"# down-weighted (<0.75): {n_downweighted}/{len(weights)}")
+
+            # Apply weights: W^(1/2) * G * x = W^(1/2) * d
+            sqrt_weights = np.sqrt(weights)
+            weight_matrix = scipy.sparse.diags(sqrt_weights)
+            weighted_sensitivity = weight_matrix @ self.sensitivity_matrix
+            weighted_residuals = sqrt_weights * self.residuals
+        else:
+            weighted_sensitivity = self.sensitivity_matrix
+            weighted_residuals = self.residuals
+            self.residual_weights = np.ones(len(self.residuals))
+
+
+        # Perform automatic damping if damp < 0
         damp = self.cfg["algorithm"]["damp"]
         if damp < 0:
-
-            base_damp = np.std(self.residuals.data) / np.median(np.abs(self.sensitivity_matrix.data)) * 0.5 # adding 1/2 fudge factor seems to fit better (TODO/why?)
+            base_damp = np.std(weighted_residuals) / np.median(np.abs(weighted_sensitivity.data)) * 0.5 # the extra 1/2 seems to fit better
 
             df = pd.DataFrame({'col': sensitivity_coo.col, 'data': np.abs(sensitivity_coo.data)})
             sensitivity_per_cell = df.groupby('col')['data'].median().reindex(range(nvoronoi), fill_value=0).values
             norm_sensitivity = sensitivity_per_cell / np.max(sensitivity_per_cell)
             norm_ray_count = ray_counts / np.max(ray_counts)
-            cell_quality = norm_sensitivity/2 + norm_ray_count/2  # should go from 0-1
+            cell_quality = norm_sensitivity/2 + norm_ray_count/2 # should be from 0 to 1
 
             if RANK == ROOT_RANK:
                 used_mask = ray_counts > 0
                 used_quality = cell_quality[used_mask]
-                percentiles = np.percentile(used_quality, [0, 25, 50, 75, 90]) # note we are only looking at the USED cells
+                percentiles = np.percentile(used_quality, [0, 25, 50, 75, 90])
                 logger.info(f" Cell quality distribution  "
                             f"0%: {percentiles[0]:.2f}, 25%: {percentiles[1]:.2f}, "
                             f"50%: {percentiles[2]:.2f}, 75%: {percentiles[3]:.2f}, 90%: {percentiles[4]:.2f}")
 
             # good = 50% reduction, bad = 100% increase
-            damp = base_damp * (0.5 + 1.5 * (1 - cell_quality)) # damping still based on ALL cells
-
+            damp = base_damp * (0.5 + 1.5 * (1 - cell_quality))
             # Infer dimensions from sensitivity matrix
-            total_cols = self.sensitivity_matrix.shape[1]
+            total_cols = weighted_sensitivity.shape[1]
             nstation = total_cols - nvoronoi
 
             # Create damping matrix for Voronoi cells only
             voronoi_damping = scipy.sparse.diags(damp, format='csr')
             # No damping for station parameters
             station_damping = scipy.sparse.diags(np.zeros(nstation), format='csr')
-
             # Combine into full damping matrix matching sensitivity matrix columns
             full_damping = scipy.sparse.block_diag([voronoi_damping, station_damping])
 
-            # Augment the system: [G; D] * x = [d; 0]
-            augmented_G = scipy.sparse.vstack([
-                self.sensitivity_matrix, 
-                full_damping
-            ])
-            augmented_d = np.concatenate([
-                self.residuals, 
-                np.zeros(nvoronoi + nstation)
-            ])
+            # Augment the (weighted!) system: [G; D] * x = [d; 0]
+            augmented_G = scipy.sparse.vstack([weighted_sensitivity, full_damping])
+            augmented_d = np.concatenate([weighted_residuals, np.zeros(nvoronoi + nstation)])
 
             result = scipy.sparse.linalg.lsmr(
-                augmented_G,
-                augmented_d, 
-                damp=0,
-                atol=atol,
-                btol=btol,
-                conlim=conlim,
-                maxiter=maxiter,
-                show=False
+                augmented_G, augmented_d, 
+                damp=0, atol=atol, btol=btol, conlim=conlim, maxiter=maxiter, show=False
             )
             x, istop, itn, normr, normar, norma, conda, normx = result
+            damp = np.mean(damp)
 
-            damp = np.mean(damp) # just for logging to get a sense of scale
-
-        # Use the literal value given in cfg
         else:
             result = scipy.sparse.linalg.lsmr(
-                self.sensitivity_matrix,
-                self.residuals, 
-                damp = damp,
-                atol = atol,
-                btol = btol,
-                conlim = conlim,
-                maxiter = maxiter,
-                show=False
+                weighted_sensitivity, weighted_residuals, 
+                damp=damp, atol=atol, btol=btol, conlim=conlim, maxiter=maxiter, show=False
             )
             x, istop, itn, normr, normar, norma, conda, normx = result
+
 
         # Set cells with insufficient rays to ZERO
         x[:nvoronoi][ray_counts < min_rays] = 0
@@ -485,14 +543,13 @@ class InversionIterator(object):
         logger.info(f"  ||m||         = {normx:8.3f}  (solution norm)")
         logger.info(f"  ||G^-1||||G|| = {conda:8.2f}  (condition estimate)")
         logger.info(f"  med(std) G,r  = {np.median(self.sensitivity_matrix.data):.3f}({np.std(self.sensitivity_matrix.data):.3f}), {np.median(self.residuals.data):.3f}({np.std(self.residuals.data):.3f})")
-        logger.info(f"  est/used damp = {np.std(self.residuals.data)/conda:.4e} / {damp:.4e}")
+        logger.info(f"  est/used damp = {np.std(weighted_residuals)/conda:.4e} / {damp:.4e}")
         logger.info(f"  used/nvoronoi = {np.sum(ray_counts >= min_rays):.0f}/{nvoronoi:.0f}  ({itn} LSMR iterations)")
 
         delta_slowness = self.projection_matrix * x[:nvoronoi]
         delta_slowness = delta_slowness.reshape(model.npts)
 
-        # can we save inversion quality metrics to weight the stack also?
-
+        # Compute/log quality metrics
         ray_coverage = np.zeros(nvoronoi)
         ray_coverage[ray_counts >= min_rays] = ray_counts[ray_counts >= min_rays] / np.max(ray_counts)
         local_quality_coverage = self.projection_matrix * ray_coverage
@@ -1217,9 +1274,10 @@ class InversionIterator(object):
 
         return (column_idxs, counts)
 
+
     @_utilities.log_errors(logger)
     def _request_dispatch(self):
-        """Request, receive, and return item from dispatcher"""
+        """ Request, receive, and return item from dispatcher """
         COMM.send(
             RANK,
             dest=ROOT_RANK,
@@ -1236,7 +1294,7 @@ class InversionIterator(object):
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def _reset_realization_stack_old(self, phase):
-        """Reset the realization stack values to np.nan for the given phase"""
+        """ Reset the realization stack values to np.nan for the given phase """
         logger.info("Resetting realization stacks...") 
         phase = phase.lower()
         stack = getattr(self, f"{phase}wave_realization_stack")
@@ -1252,7 +1310,7 @@ class InversionIterator(object):
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def _reset_realization_stack(self, phase):
-        """Reset the realization stack by deleting and recreating"""
+        """ Reset the realization stack by deleting and recreating """
         phase = phase.lower()
 
         for prefix in ["wave", "qual"]:
@@ -1268,7 +1326,7 @@ class InversionIterator(object):
 
     @_utilities.log_errors(logger)
     def _sample_arrivals(self, phase, useall=False, do_remove_outliers=True):
-        """Draw a random sample of arrivals and update the sampled_arrivals attribute"""
+        """ Draw a random sample of arrivals and update the sampled_arrivals attribute """
         if RANK == ROOT_RANK:
 
             # Filter by phase first, then by event_id
@@ -1400,7 +1458,7 @@ class InversionIterator(object):
 
                         columns = ["latitude", "longitude", "depth"]
                         coords = event[columns]
-                        coords = geo2sph(coords).astype(dtype=_constants.DTYPE_REAL)
+                        coords = geo2sph(coords).astype(dtype=_constants.DTYPE_REAL)                  
 
                         # trace_ray does not handle bad events very well.. skipping them should be OK?
                         try:
@@ -1897,6 +1955,7 @@ class InversionIterator(object):
                     solver.src_loc = coords
                     solver.solve() # we're seeing -inf traveltimes
 
+                    # only way to sniff these out is via a separate script unfortunately
                     if solver.tt.values.min() == -np.inf:  # fixes the few trouble arrivals
                         logger.warn(f"-inf values found in solver.tt for {network}.{station}.{phase} ...no problem, setting these to a safe value")
                         min_val = np.min(solver.tt.values[~np.isinf(solver.tt.values)])
@@ -1962,6 +2021,9 @@ class InversionIterator(object):
         else:
             self.resanitize_data()
 
+        if self.iiter == 1:
+            self.save_stations() # save the first filtered station for sharing/etc
+
         self.check_event_bounds()
 
         for phase in phase_order:
@@ -2001,7 +2063,6 @@ class InversionIterator(object):
         self.purge_raypaths()
         self.resanitize_data()
         self.save_events() # n.b. the first 00.events.h5 is the initial relocated (-r) model, may be faster to start from this in the future
-        #self.save_stations() # not in use.. yet?
 
 
     @_utilities.log_errors(logger)
@@ -2062,7 +2123,7 @@ class InversionIterator(object):
         Remove events that have been runaway migrated beyond some tolerance
         """
         if RANK == ROOT_RANK:
-            logger.info("Removing runaway event migrations.")
+            logger.info("Removing runaway event migrations.   ###")
 
             events = self.events
             n0 = len(events)
@@ -3073,39 +3134,40 @@ class InversionIterator(object):
             # Deriving the dominant stack value is a bit tricky.
             # Robust way is median, but we lose amplitude variation unless very small mesh.
             # A mean is great, but suffers if data is poor (fat, skewed, or multimodal distribution).
-            # We can also try a 1D KDE which should be able to return the most likely value in either case
-            #  though it will take quite a bit longer.
+            # Over time a "clipped mean" seems to perform best for both synthetic and real data,
+            #  but let users experiment themselves
+            # Original code was a pure median
 
-            # Classic median
-            #delta_slowness = np.ma.median(stack,axis=0)
-            
-            # Get generic mask for X std (2 seems fair)
-            median_stack = np.ma.median(stack, axis=0)
-            std_stack = np.ma.std(stack, axis=0)
-            mask = np.abs(stack - median_stack) > 2 * std_stack
-            clipped = np.ma.array(stack, mask=mask)
+            trim_fraction = self.cfg["algorithm"].get("stack_trim_percent", 0)
+            trim_fraction = np.clip(float(trim_fraction/100),0,0.9) # cap at 90%!
 
-            # Binned mean
-            delta_slowness_mean = np.ma.mean(clipped, axis=0)
+            if trim_fraction > 0:
+                nreal = stack.shape[0]
+                n_trim = int(nreal * trim_fraction)
 
-            # Binned median (marginally better)
-            delta_slowness_median = np.ma.median(clipped, axis=0)
+                if n_trim > 0 and nreal > 2 * n_trim:
+                    sorted_stack = np.ma.sort(stack, axis=0)
+                    trimmed_stack = sorted_stack[n_trim:-n_trim, :, :, :]
+                else:
+                    # Not enough realizations to trim
+                    trimmed_stack = stack
+            else:
+                trimmed_stack = stack
 
-            # Take average of the two? Seems to generate in some "spotty" results
-            #delta_slowness = (delta_slowness_mean + delta_slowness_median) / 2
+            stack_type = self.cfg["algorithm"].get("stack_type", "mean")
+            if stack_type.lower() == 'median':
+                delta_slowness = np.ma.median(trimmed_stack, axis=0)
+            else:
+                delta_slowness = np.ma.mean(trimmed_stack, axis=0)
 
-            # Just the median is probably the most robust (as originally coded!)
-            delta_slowness = delta_slowness_median
-
-            # Use KDE? Kinda stinks / time consuming
-            #delta_slowness = _utilities.kde_stack(stack, bw_method='scott')
 
             # Grab the model we are updating (which should be in velocity)
             model = getattr(self, f"{phase}wave_model")
 
-            # hold onto the original copy to restore certain very low velocity (i.e. oceans or magma) areas
+
+            # Hold onto the original copy to restore certain very low velocity (oceans mostly?) areas
             orig_model = model.values.copy()
-            watermask = model.values <= 0.2 # assume 0.2 m/s is water / TODO parameterize?
+            watermask = model.values <= 0.2 # assume 0.2 km/s is water / TODO parameterize?
             wateridx = np.where(watermask)
 
             # Apply velocity guardrails here? +/- 20% or something? TODO / probably unncessary
@@ -3316,7 +3378,7 @@ class InversionIterator(object):
             self._generate_voronoi_cells(phase,mod_kvoronoi,mod_nvoronoi,alpha,adaptive_weight,density_to_gradient_weight)
             self._compute_sensitivity_matrix(phase,hvr)
             self._update_projection_matrix(phase,hvr)
-            self._compute_model_update(phase,min_rays=min_rays_per_cell)
+            self._compute_model_update(phase,min_rays=min_rays_per_cell,use_weights=False) # don't apply weights for the resolution test
 
         # Process stack using same method as real inversion
         self.update_model(phase)

@@ -9,7 +9,7 @@ from . import _constants
 from . import _picklabel
 from . import _utilities
 
-# Get logger handle.
+# Get logger handle
 logger = _utilities.get_logger(f"__main__.{__name__}")
 
 
@@ -18,13 +18,13 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
     vertical_layers = [10,25,50,80,150], amplitude=0.08):
     """
     Create smooth checkerboard using cosine smoothing in horizontal,
-    Hann windows (length 3*dz) in vertical. Flips vertical polarity
+    Hann windows (N * dz) in vertical. Flips vertical polarity
     at user defined levels (force users to decide!)
     """
 
     # Hardwire vertical smoothing
     dz = base_model.node_intervals[0] 
-    vertical_smooth_km = 3 * dz  # turns OFF at 1 * dz
+    vertical_smooth_km = 2 * dz  # turns OFF at 1 * dz. SOME smoothing shows benefit over a sharp boundary.
 
     logger.info(f"Creating checkerboard with {horiz_block_size_km}km horizontal,"
      f" {vertical_layers}km vertical blocks, {vertical_smooth_km:.1f}km vertical smoothing, {amplitude} amplitude   ###")
@@ -85,37 +85,37 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
 
 def _extract_recovered_model(iterator, phase):
     """ Extract recovered model from inversion results """
-    
+
     if phase == 'P':
         final_model = iterator.pwave_model
     else:
         final_model = iterator.swave_model
-    
+
     # Use the final processed model (already averaged by update_model())
     recovered_model = _copy_scalar_field(final_model)
-    
+
     # Create Voronoi coverage mask to identify well-constrained areas
     voronoi_mask = _create_voronoi_coverage_mask(iterator, final_model, phase)
-    
+
     # Apply masking - set poorly constrained areas to NaN
     masked_values = recovered_model.values.copy()
     masked_values[~voronoi_mask] = np.nan
     recovered_model.values = masked_values
-    
+
     # Log diagnostics
     n_valid = np.sum(voronoi_mask)
     n_total = np.prod(final_model.values.shape)
-    
+
     logger.info(f"Voronoi mask covers {n_valid}/{n_total} nodes ({n_valid/n_total*100:.1f}%)   ###")
-    
+
     if n_valid > 0:
         valid_values = masked_values[voronoi_mask]
         logger.info(f"Masked velocity range: {valid_values.min():.2f} to {valid_values.max():.2f}")
     else:
         logger.warning("No valid nodes after Voronoi masking")
-    
+
     logger.info(f"Final model velocity range: {final_model.values.min():.2f} to {final_model.values.max():.2f}   ###")
-    
+
     return recovered_model
 
 # this needs work
@@ -171,10 +171,10 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
             'total_nodes': len(input_pert.flatten()),
             'voronoi_nodes': 0
             }
-    
+
     # Pattern correlation (handles spatial shifts better)
     correlation = np.corrcoef(masked_input.flatten(), masked_recovered.flatten())[0,1]
-    
+
     # RMS amplitude recovery
     rms_input = np.sqrt(np.mean(masked_input**2))
     rms_recovered = np.sqrt(np.mean(masked_recovered**2))

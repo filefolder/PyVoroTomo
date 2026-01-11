@@ -269,7 +269,7 @@ def parse_cfg(configuration_file):
     _cfg["adaptive_data_weight"] = parser.getfloat(
         "algorithm",
         "adaptive_data_weight",
-        fallback=0.5
+        fallback=0.6
     )
     _cfg["density_to_gradient_weight"] = parser.getfloat(
         "algorithm",
@@ -299,7 +299,7 @@ def parse_cfg(configuration_file):
     _cfg["paretos_alpha"] = parser.getfloat(
         "algorithm",
         "paretos_alpha",
-        fallback=1.5
+        fallback=2
     )
     _cfg["phase_order"] = [str(v).upper() for v in parser.get(
         "algorithm",
@@ -374,6 +374,36 @@ def parse_cfg(configuration_file):
         "max_event_residual",
         fallback=1.3
     )
+    _cfg["solver_weight_start"] = parser.getfloat(
+        "algorithm",
+        "solver_weight_start",
+        fallback=0.0
+    )
+    _cfg["solver_weight_end"] = parser.getfloat(
+        "algorithm",
+        "solver_weight_end",
+        fallback=0.8
+    )
+    _cfg["solver_weight_method"] = parser.get(
+        "algorithm",
+        "solver_weight_method",
+        fallback='huber'
+    ).lower()
+    _cfg["solver_weight_tuning"] = parser.getfloat(
+        "algorithm",
+        "solver_weight_tuning",
+        fallback=-1
+    )
+    _cfg["stack_type"] = parser.get(
+        "algorithm",
+        "stack_type",
+        fallback='mean'
+    )
+    _cfg["stack_trim_percent"] = parser.getfloat(
+        "algorithm",
+        "stack_trim_percent",
+        fallback=20.0
+    )    
     _cfg["max_dlat"] = parser.getfloat(
         "algorithm",
         "max_dlat",
@@ -561,7 +591,8 @@ def parse_cfg(configuration_file):
     _cfg = dict()
     _cfg["method"] = parser.get(
         "relocate",
-        "method"
+        "method",
+        fallback='DE'
     ).upper()
 
     if _cfg["method"] == "LINEAR":
@@ -792,6 +823,64 @@ def arrival_dict(dataframe, event_id):
     return _arrival_dict
 
 
+def compute_residual_weights(residuals, method="huber", scale=None, tuning_param=-1):
+    """
+    Compute solver weights based on arrival residuals to down-weight outliers.
+
+    Args:
+        residuals: Array of traveltime residuals
+        method: Weighting method:
+            - "huber": Down-weighting beyond threshold, w = k/|u| for |u| > k
+            - "linear": Linear decay from 1 to 0 based on percentile
+        scale: Scale estimate for residuals. If None, uses MAD.
+        tuning_param: Method-specific parameter:
+            - huber: Threshold for down-weighting onset (default: 1.3)
+            - linear: Percentile for upper bound (default: 70%)
+
+    Returns:
+        weights: Array of weights in [0, 1], where 1 = full weight
+    """
+    residuals = np.asarray(residuals)
+
+    # Robust scale estimate using MAD
+    if scale is None:
+        mad = np.median(np.abs(residuals - np.median(residuals)))
+        scale = max(mad * 1.4826, 1e-6)
+
+    abs_u = np.abs(residuals / scale)
+
+    if method == "huber":
+        k = tuning_param if tuning_param > 0 else 1.3
+        weights = np.where(abs_u <= k, 1.0, k / abs_u)
+
+    elif method == "linear":
+        percentile = tuning_param if tuning_param > 0 else 70
+        upper = np.percentile(abs_u, percentile)
+        upper = max(upper, 1e-6)
+        weights = 1 - (abs_u / upper)
+        weights = np.clip(weights, 0, 1)
+
+    else:
+        raise ValueError(f"Unknown method: {method}. Use: huber or linear")
+
+    return weights
+
+
+def blend_weights(weights, blend_factor):
+    """
+    Blend weights from 0 to 1
+
+    Args:
+        weights: weights from compute_residual_weights
+        blend_factor: 0 = uniform weights, 1 = full weighting
+
+    Returns:
+        Blended weights
+    """
+    blend_factor = np.clip(blend_factor, 0.0, 1.0)
+    return (1 - blend_factor) + blend_factor * weights
+
+
 # not used 
 def fibonacci(n):
     """ Return the n-th number in the Fibonacci sequence """
@@ -802,7 +891,7 @@ def fibonacci(n):
 def eq_angle(eq_distkm,eq_depth):
     """
     Returns the angle in degrees from station to event.
-    primarily to reduce shallow events with crustal reflections 
+    primarily to reduce shallow events with crustal reflections
     but still allow deep teleseismic events through
     """
     theta = np.arctan2(eq_distkm, eq_depth)
@@ -914,3 +1003,4 @@ def kde_stack(stack, bw_method='scott', return_uncertainty=False):
         return delta_slowness, uncertainty
 
     return delta_slowness
+

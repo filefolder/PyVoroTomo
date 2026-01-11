@@ -1,3 +1,8 @@
+V2.0.2
+- Add solver weighting scheme based on arrival residual (user adjustable)
+- Add params/options for model update via realizations stacking (user adjustable)
+- Reduce default vertical res test smoothing to 2*dz
+
 V2.0.1
 - Move some CLI arguments to config file (breaking change!)
 - Require PyKonal 0.5 (non-standard; see below)

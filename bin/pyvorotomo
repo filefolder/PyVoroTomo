@@ -29,9 +29,7 @@ logger = _utilities.get_logger(__name__)
 
 @_utilities.log_errors(logger)
 def main(argc):
-    """
-    The main control loop.
-    """
+    """ The main control loop """
     logger.info(">>>  Starting PyVoroTomo  <<<")
 
     # Instantiate an InversionIterator object
@@ -40,7 +38,7 @@ def main(argc):
     # Always load configuration first
     inversion_iterator.load_cfg()
 
-    # Check if we're only running a resolution test
+    # Check if we are only running a resolution test
     if argc.test_only:
         logger.info("__Running resolution test only__")
         inversion_iterator.load_network_geometry()
@@ -51,7 +49,7 @@ def main(argc):
         if rerun_dir and os.path.exists(rerun_dir):
             #logger.info(f"Testing existing results from {rerun_dir}")
             pass
-        else: ## I think this else catch shouldn't exist.. the rerun dir is mandatory!!
+        else: ## I think this else catch should not exist.. the rerun dir is mandatory!!
             logger.info(f"Could not find rerun directory: {rerun_dir}")
             return False
 
@@ -77,11 +75,11 @@ def main(argc):
     # Synchronize data across all processes
     inversion_iterator.synchronize(attrs="all")
 
-    # Compute traveltime-lookup tables.
+    # Compute traveltime-lookup tables
     inversion_iterator.compute_traveltime_lookup_tables()
 
     if argc.relocate_first is True:
-        # Relocate all events.
+        # Relocate all events
         relocation_method = inversion_iterator.cfg["relocate"]["method"]
         if relocation_method == "LINEAR":
             raise (
@@ -120,7 +118,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGCONT, _utilities.signal_handler)
     signal.signal(signal.SIGTERM, _utilities.signal_handler)
 
-    # Parse command line arguments.
+    # Parse command line arguments
     argc   = _utilities.parse_args()
 
     # Parse config and force these two back into argc to make life a bit easier
@@ -130,14 +128,14 @@ if __name__ == "__main__":
 
     _utilities.COMM.barrier() # trying to stop the some sort of race condition with the output_dir
 
-    # Configure logging.
+    # Configure logging
     _utilities.configure_logger(
         __name__,
         argc.log_file,
         verbose=argc.verbose
     )
 
-    # Start the  main loop.
+    # Start the main loop
     try:
         main(argc)
     except Exception as exc:

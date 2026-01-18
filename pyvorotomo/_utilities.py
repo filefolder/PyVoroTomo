@@ -279,12 +279,12 @@ def parse_cfg(configuration_file):
     _cfg["niter"] = parser.getint(
         "algorithm",
         "niter",
-        fallback=1
+        fallback=4
     )
     _cfg["kvoronoi"] = parser.getfloat(
         "algorithm",
         "kvoronoi",
-        fallback=5
+        fallback=15
     )
     _cfg["nvoronoi"] = parser.getint(
         "algorithm",
@@ -831,11 +831,11 @@ def compute_residual_weights(residuals, method="huber", scale=None, tuning_param
         residuals: Array of traveltime residuals
         method: Weighting method:
             - "huber": Down-weighting beyond threshold, w = k/|u| for |u| > k
-            - "linear": Linear decay from 1 to 0 based on percentile
+            - "linear": Full weight up to threshold percentile, then linear decay to 0
         scale: Scale estimate for residuals. If None, uses MAD.
         tuning_param: Method-specific parameter:
-            - huber: Threshold for down-weighting onset (default: 1.3)
-            - linear: Percentile for upper bound (default: 70%)
+            - huber: Threshold for down-weighting onset (default: 1.5)
+            - linear: Threshold percentile for down-weighting onset (default: 80%)
 
     Returns:
         weights: Array of weights in [0, 1], where 1 = full weight
@@ -850,14 +850,15 @@ def compute_residual_weights(residuals, method="huber", scale=None, tuning_param
     abs_u = np.abs(residuals / scale)
 
     if method == "huber":
-        k = tuning_param if tuning_param > 0 else 1.3
+        k = tuning_param if tuning_param > 0 else 1.5
         weights = np.where(abs_u <= k, 1.0, k / abs_u)
 
     elif method == "linear":
-        percentile = tuning_param if tuning_param > 0 else 70
-        upper = np.percentile(abs_u, percentile)
-        upper = max(upper, 1e-6)
-        weights = 1 - (abs_u / upper)
+        percentile = tuning_param if tuning_param > 0 else 80
+        threshold = np.percentile(abs_u, percentile)
+        upper = np.percentile(abs_u, 95)  # treat the worst 5% equally bad
+        threshold = max(threshold, 1e-6)
+        weights = np.where(abs_u <= threshold, 1.0, 1 - (abs_u - threshold) / (upper - threshold))
         weights = np.clip(weights, 0, 1)
 
     else:

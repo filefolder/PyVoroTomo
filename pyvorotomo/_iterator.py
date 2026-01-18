@@ -104,6 +104,10 @@ class InversionIterator(object):
     def arrivals(self):
         return self._arrivals
 
+    @arrivals.setter
+    def arrivals(self, value):
+        self._arrivals = value
+
     @property
     def arrivals_history(self):
         return self._arrivals_history
@@ -111,10 +115,6 @@ class InversionIterator(object):
     @arrivals_history.setter
     def arrivals_history(self, value):
         self._arrivals_history = value
-
-    @arrivals.setter
-    def arrivals(self, value):
-        self._arrivals = value
 
     @property
     def cfg(self):
@@ -411,8 +411,8 @@ class InversionIterator(object):
         # Linear ramp: 0 at iter 1, 1 at final iter
         progress = (self.iiter - 1) / (niter - 1)
 
-        # Try SQRT scaling so it ramps up a bit faster at the start
-        progress = np.sqrt(np.clip(progress,0,1))
+        # Try SQRT scaling so it ramps up a bit faster at the start (nah, this is a bad idea)
+        #progress = np.sqrt(np.clip(progress,0,1))
 
         blend = start_blend + progress * (end_blend - start_blend)
 
@@ -466,12 +466,12 @@ class InversionIterator(object):
             self.residual_weights = weights
 
             # Log statistics
-            n_downweighted = np.sum(weights < 0.75)
-            min_weight = np.min(weights)
-            mean_weight = np.mean(weights)
-            std_weight = np.std(weights)
+            min_weight = np.min(raw_weights)
+            mean_weight = np.mean(raw_weights)
+            std_weight = np.std(raw_weights)
+            n_downweighted = np.sum(raw_weights < 0.999) #slightly less than 1.0 since there are small epsilon values at play
             logger.info(f" Arrival weighting: blend: {solver_weight_blend_factor:.2f}, mean(std): {mean_weight:.2f} ({std_weight:.2f}), min: {min_weight:.3f}, "
-                f"# down-weighted (<0.75): {n_downweighted}/{len(weights)}")
+                f"% weighted (total): {n_downweighted/len(raw_weights)*100:.1f}% ({len(raw_weights)})")
 
             # Apply weights: W^(1/2) * G * x = W^(1/2) * d
             sqrt_weights = np.sqrt(weights)
@@ -1002,7 +1002,6 @@ class InversionIterator(object):
             logger.info(f" Cell count: {n_cells} ({kvoronoi} k-medians, {n_cells-kvoronoi} random/adaptive)")
             logger.info(f" Average horizontal cell width: {cell_widths_km:.1f} km")
 
-
         self.synchronize(attrs=["voronoi_cells"])
 
         return True
@@ -1101,7 +1100,7 @@ class InversionIterator(object):
         tolerance = (max_coords - min_coords) * 0.01
         bounded_mask = np.all(
             (midpoints >= min_coords - tolerance) & 
-            (midpoints <= max_coords + tolerance), 
+            (midpoints <= max_coords + tolerance),
             axis=1
         )
 
@@ -1329,8 +1328,16 @@ class InversionIterator(object):
         """ Draw a random sample of arrivals and update the sampled_arrivals attribute """
         if RANK == ROOT_RANK:
 
-            # Filter by phase first, then by event_id
-            arrivals = self.arrivals[self.arrivals["phase"] == phase]
+            # Filter by distance for sampled_arrivals
+            max_dist   = self.cfg["algorithm"]["max_dist"]
+            min_dist   = self.cfg["algorithm"]["min_dist"]
+
+            arrivals = self.arrivals[
+                (self.arrivals["phase"] == phase) & 
+                (self.arrivals["delta"] >= min_dist) & 
+                (self.arrivals["delta"] <= max_dist)
+            ]
+
             event_ids = self.sampled_events["event_id"]
             arrivals = arrivals[arrivals["event_id"].isin(event_ids)].copy()
 
@@ -1458,7 +1465,7 @@ class InversionIterator(object):
 
                         columns = ["latitude", "longitude", "depth"]
                         coords = event[columns]
-                        coords = geo2sph(coords).astype(dtype=_constants.DTYPE_REAL)                  
+                        coords = geo2sph(coords).astype(dtype=_constants.DTYPE_REAL)
 
                         # trace_ray does not handle bad events very well.. skipping them should be OK?
                         try:
@@ -1496,15 +1503,26 @@ class InversionIterator(object):
 
 
     @_utilities.log_errors(logger)
-    def track_residual_improvement(self, min_improvement=0.01, safe_residual=0.3):
+    def track_residual_improvement(self, min_improvement=-0.05, safe_residual=None):
         """
-        Track arrival residuals per iteration,
-        remove if above safe_residual AND not improving
-        min_improvement is a fraction (.01 = 1%), safe_residual in seconds
+        Track arrival and event residuals per iteration,
+        remove if above safe_residual AND not improving. Meant to just remove clearly bad stuff.
+
+        min_improvement is a fraction (e.g. -.05 = -5%).
+          Arrivals/Events must not degrade further than this
+
+        Safe_residual in seconds
+
+        If safe_residual not set (default), assume: mean with floor of 0.3 seconds
+            (e.g. residuals under this don't _need_ to improve)
         """
 
         if RANK == ROOT_RANK:
             logger.info(f"Tracking residuals for iteration {self.iiter}...   ###")
+
+            # Cold start
+            if self.iiter <= 1:
+                min_improvement = -0.20
 
             current_arrival_ids = set(self.arrivals['arrival_id'])
             current_event_ids = set(self.events['event_id'])
@@ -1532,9 +1550,16 @@ class InversionIterator(object):
             prev_col = f'iter_{self.iiter - 1}'
             curr_col = f'iter_{self.iiter}'
 
-            # Arrival improvements
+
+            ##### Arrival improvements
             prev_arrival_residuals = self.arrival_history[prev_col]
             curr_arrival_residuals = self.arrival_history[curr_col]
+
+            # if safe_residual is None, then set to mean
+            if not safe_residual:
+                mean_residual = np.mean(curr_arrival_residuals)
+                #std_residual = np.std(curr_arrival_residuals)
+                safe_residual = max(0.3, mean_residual)
 
             # Only check improvement for arrivals with residuals above safe_residual
             significant_arrival_mask = prev_arrival_residuals > safe_residual
@@ -1551,9 +1576,16 @@ class InversionIterator(object):
             logger.info(f"Mean arrival residual reduction: {mean_arrival_improvement:.2f}% "
                    f"({mean_prev_arrival:.4f} -> {mean_curr_arrival:.4f})   ###")
 
-            # Event improvements
+
+            ##### Event improvements
             prev_event_residuals = self.event_history[prev_col]
             curr_event_residuals = self.event_history[curr_col]
+
+            # if safe_residual is None, then set to 1 std below mean
+            if not safe_residual:
+                mean_residual = np.mean(curr_event_residuals)
+                #std_residual = np.std(curr_event_residuals)
+                safe_residual = max(0.3, mean_residual - std_residual)
 
             # Only check improvement for events with residuals above safe_residual
             significant_event_mask = prev_event_residuals > safe_residual
@@ -1571,14 +1603,20 @@ class InversionIterator(object):
                    f"({mean_prev_event:.4f} -> {mean_curr_event:.4f})   ###")
 
             # Remove non-improving events FIRST (and their associated arrivals)
-            if len(events_to_remove) > 0:
-                ## Remove events
-                #self.events = self.events[~self.events['event_id'].isin(events_to_remove)].reset_index(drop=True)
-                #self.event_history = self.event_history[~event_mask_to_remove].reset_index(drop=True)
+            # HOWEVER! Don't remove any on the first pass. But DO remove bad arrivals on the first pass.
+            # Events may be good but have enough bad picks to affect this.
+            # If removing arrivals puts events below minpicks thresh they will be booted in resanitize_data
+            if self.iiter > 1 and len(events_to_remove) > 0:
+                # Sanity check
+                if len(events_to_remove) > 0.3 * len(self.events):
+                    logger.warning(f"Removed {len(events_to_remove)/(len(self.events)+.1)*100:.2f}% of total events!   ###")
 
-                # Print the dropped source_ids for later debugging?
+                # Print the dropped source_ids for later review
                 dropped_events = self.events[self.events['event_id'].isin(events_to_remove)]
                 logger.info(f"Removing {len(dropped_events)} events with source_ids: {dropped_events['source_id'].tolist()}   ###")
+                dropped_events[['source_id', 'residual']].to_csv(
+                    self.cfg["model"]["output_dir"]+'/dropped_events.txt', 
+                    mode='a', header=False, index=False, sep=' ')
 
                 # Remove events
                 self.events = self.events[~self.events['event_id'].isin(events_to_remove)].reset_index(drop=True)
@@ -1596,14 +1634,16 @@ class InversionIterator(object):
                            f"and {arrivals_removed_by_event} associated arrivals   ###")
 
             # Remove individual non-improving arrivals (only those not already removed)
+            # We may need to add a caveat for single-arrival events (e.g. teleseisms) TODO
             if len(arrivals_to_remove) > 0:
-                # Filter out arrival_ids that were already removed with their events
+                # Sanity check
                 remaining_arrival_ids = set(self.arrivals['arrival_id'])
                 arrivals_to_remove = [aid for aid in arrivals_to_remove if aid in remaining_arrival_ids]
 
+                # Filter out arrival_ids that were already removed with their events
                 if len(arrivals_to_remove) > 0:
-                    if len(arrivals_to_remove) > 0.5 * len(self.arrivals):
-                        logger.warning(f"We are over-removing arrivals and probably need to stop now")
+                    if len(arrivals_to_remove) > 0.3 * len(self.arrivals):
+                        logger.warning(f"Removed {len(arrivals_to_remove)/(len(self.arrivals)+.1)*100:.2f}% of total arrivals!   ###")
 
                     self.arrivals = self.arrivals[~self.arrivals['arrival_id'].isin(arrivals_to_remove)].reset_index(drop=True)
 
@@ -1674,17 +1714,20 @@ class InversionIterator(object):
                 # Compute densities at data points
                 densities = interpolator(data_normalized)
 
-                # Towards the end, equal weighting
-                if self.iiter < 7:
+                niter = self.cfg["algorithm"]["niter"]
+                if self.iiter < 2:
+                    # Strong inverse weighting
+                    weights = 1.0 / densities
+                elif self.iiter < 4:
+                    # Transition to exp-based weighting
                     weights = 1.0 / np.exp(densities)
                 else:
-                    # Else, equal weighting
-                    weights = np.ones_like(densities)
-                #else:
-                #    # Steps 2-4: linear transition between the two extremes
-                #    progress = (self.iiter - 1) / 4  # ie from 0.25 (step 2) to 0.75 (step 4)
-                #    uniform_weight = np.ones_like(densities)
-                #    weights = (1 - progress) * (1/densities) + progress * uniform_weight
+                    # Taper from density-weighted to uniform over remaining iterations
+                    progress = (self.iiter - 4) / (niter - 4)  # 0 at iter 4, 1 at final iter
+                    progress = min(progress, 1.0)
+                    density_weight = 1.0 / np.exp(densities)
+                    uniform_weight = np.ones_like(densities)
+                    weights = (1 - progress) * density_weight + progress * uniform_weight
 
 
                 # Set any problem infinite or NaN values to 0
@@ -1763,10 +1806,12 @@ class InversionIterator(object):
                 merge_keys = ["network", "station"]
                 arrivals = arrivals.merge(stations[merge_columns], on=merge_keys)
 
-                # compute ray geometry
+                # Compute ray geometry
                 dlat = arrivals["event_latitude"] - arrivals["station_latitude"]
                 dlon = arrivals["event_longitude"] - arrivals["station_longitude"]
                 arrivals["azimuth"] = np.arctan2(dlat, dlon)
+
+                # Also done in sanitize_data, but doing it here ensures updated each iteration
                 arrivals["delta"] = _utilities.dist_deg(
                     arrivals["event_latitude"],
                     arrivals["event_longitude"],
@@ -1814,12 +1859,8 @@ class InversionIterator(object):
                 )
                 densities = interpolator(data_normalized)
 
-                # Calculate weights... inversely proportional to density of raypaths!
-                if self.iiter < 7:
-                    dataweight = 1 / np.exp(densities)
-                else:
-                    # Towards the end, equal weighting
-                    dataweight = np.ones_like(densities)
+                # For arrivals, just use the same weight scheme the whole time
+                dataweight = 1 / np.exp(densities)
 
                 # Set any infinite or NaN values to 0
                 bad_values = ~np.isfinite(dataweight)
@@ -1989,9 +2030,9 @@ class InversionIterator(object):
         """
 
         niter = self.cfg["algorithm"]["niter"]
-        hvr = self.cfg["algorithm"]["hvr"] # note this WAS a list, now just a float
+        hvr = self.cfg["algorithm"]["hvr"]
         nvoronoi = self.cfg["algorithm"]["nvoronoi"]
-        kvoronoi_percent = self.cfg["algorithm"].get("kvoronoi",5)
+        kvoronoi_percent = self.cfg["algorithm"].get("kvoronoi",10)
 
         alpha = self.cfg["algorithm"]["paretos_alpha"]
         nreal = self.cfg["algorithm"]["nreal"]
@@ -2016,7 +2057,7 @@ class InversionIterator(object):
 
         logger.info(f"Iteration #{self.iiter} (/{niter}) with hvr = {hvr}   ###")
 
-        if self.cfg["argc"]["relocate_first"]=="False":
+        if self.cfg["argc"]["relocate_first"] == "False":
             self.sanitize_data()
         else:
             self.resanitize_data()
@@ -2030,6 +2071,7 @@ class InversionIterator(object):
             logger.info(f" >>> Starting {phase}-wave iteration {self.iiter}/{niter} <<<")
 
             self._reset_realization_stack(phase)
+       
             self._estimate_velocity_gradient_density(phase) # new! define vel gradients for adaptive meshing
 
             for self.ireal in range(nreal):
@@ -2039,9 +2081,9 @@ class InversionIterator(object):
                 self._trace_rays(phase)
 
                 # Add some minor stochastic variability
-                mod_nvoronoi = int(nvoronoi*np.random.uniform(low=0.70, high=1.15)) # mostly dip lower but sometimes higher (TODO set in params?)
+                mod_nvoronoi = int(nvoronoi*np.random.uniform(low=0.8, high=1.1)) # mostly dip lower but sometimes higher (TODO set in params?)
                 kvoronoi = int(mod_nvoronoi * kvoronoi_percent/100)
-                mod_kvoronoi = min(kvoronoi,int(mod_nvoronoi*0.7)) # sanity cap k's at 70% total n's
+                mod_kvoronoi = min(kvoronoi,int(mod_nvoronoi*0.6)) # sanity cap k's at 60% total n's
 
                 self._generate_voronoi_cells(phase,mod_kvoronoi,mod_nvoronoi,alpha,adaptive_weight,density_to_gradient_weight) # only takes a few sec usually
                 self._compute_sensitivity_matrix(phase,hvr)
@@ -2280,7 +2322,7 @@ class InversionIterator(object):
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def purge_raypaths(self):
-        """Destroys all stored raypaths"""
+        """ Destroys all stored raypaths """
         logger.debug(f"Purging raypath directory: {self.raypath_dir}")
 
         shutil.rmtree(self.raypath_dir)
@@ -2304,7 +2346,7 @@ class InversionIterator(object):
         # Then update arrival and event KDE weights
         phase_order = self.cfg["algorithm"]["phase_order"]
         for phase in phase_order:
-            self.update_arrival_weights(phase)
+            self.update_arrival_weights(phase) #this re-computes delta, but we shouldn't need to do that
 
         self.update_event_weights()
 
@@ -2458,16 +2500,16 @@ class InversionIterator(object):
                 return False
 
         else:
-            # Define columns to output.
+            # Define columns to output
             columns = ["latitude","longitude","depth","time","residual","event_id","source_id"]
 
-            # Initialize EQLocator object.
+            # Initialize EQLocator object
             _path = self.traveltime_inventory_path
             _station_dict = _utilities.station_dict(self.stations)
 
             with pykonal.locate.EQLocator(_path) as locator:
 
-                # Create some aliases for configuration-file parameters.
+                # Create some aliases for configuration-file parameters
                 depth_min = self.cfg["relocate"]["depth_min"]
                 dlat = self.cfg["relocate"]["dlat"]
                 dlon = self.cfg["relocate"]["dlon"]
@@ -2693,7 +2735,7 @@ class InversionIterator(object):
             min_depth   = self.cfg["algorithm"]["min_depth"]
             cutoff_depth = self.cfg["algorithm"]["cutoff_depth"]
 
-            # Merge event data
+            # Merge event data (why is this needed?)
             events = self.events.rename(
                 columns={
                     "latitude": "event_latitude",
@@ -2730,12 +2772,13 @@ class InversionIterator(object):
             arrivals = arrivals.merge(stations[merge_columns], on=merge_keys)
 
 
-            # Apply distance filters if events are shallower than cutoff_depth
+            # Set arrivals distance (for use later, in sample_arrivals. do this once per iteration.)
             dist = _utilities.dist_km(arrivals["event_latitude"],arrivals["event_longitude"],
                                    arrivals["station_latitude"],arrivals["station_longitude"])
-            arrivals["delta"] = dist
+            self.arrivals["delta"] = dist
 
-            # Only select arrivals within desired distance bounds
+            # Only select arrivals within desired distance bounds / NO! keep them for relocation. remove them only for inversion/meshing
+            """
             idx_keep = arrivals[
                 ((arrivals['delta'] >= min_dist) & (arrivals['delta'] <= max_dist))
             ].index
@@ -2745,17 +2788,19 @@ class InversionIterator(object):
             dn = n0 - len(arrivals)
             if dn > 0:
                 logger.info(f"Dropped {dn} arrivals outside of requested lateral range. {n0-dn} remain.   ###")
+            """
 
-            # Now only select arrivals within desired depth bounds
-            idx_keep = arrivals[
-                ((arrivals['event_depth'] >= min_depth) & (arrivals['event_depth'] <= max_depth))
+            # Only select events within desired depth bounds
+            idx_keep = self.events[
+                ((self.events['depth'] >= min_depth) & (self.events['depth'] <= max_depth))
             ].index
 
-            n0 = len(arrivals)
-            self.arrivals = arrivals.loc[idx_keep] # can revert back to self.arrivals now
-            dn = n0 - len(self.arrivals)
+            n0 = len(self.events)
+            self.events = self.events.loc[idx_keep]
+            dn = n0 - len(self.events)
             if dn > 0:
-                logger.info(f"Dropped {dn} arrivals outside of requested depth range. {n0-dn} remain.   ###")
+                logger.info(f"Dropped {dn} events outside of requested depth range. {n0-dn} remain.   ###")
+
 
             # Drop events without arrivals
             n0 = len(self.events)
@@ -2794,7 +2839,6 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(f"Dropped {dn} arrivals without associated stations. {n0-dn} remain.   ###")
 
-
             if len(self.stations) == 0:
                 logger.error("All stations were dropped!!")
             if len(self.events) == 0:
@@ -2821,7 +2865,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(f"Dropped {dn} NaNs from events (shouldn't be happening...)   ###")
 
-            # Drop events where weight is 0 (what causes this??)
+            # Drop events where weight is 0 (usually a bug in the source catalog)
             if 'weight' in self.events.columns:
                 n0 = len(self.events)
                 self.events = self.events[self.events['weight'] > 0]
@@ -2846,7 +2890,7 @@ class InversionIterator(object):
                 if dn > 0:
                     logger.info(f"Dropped {dn} arrivals with zero weights. {n0-dn} remain. (shouldn't happen!)   ###")
 
-            # Drop events or arrivals with bad residuals
+            # Drop events or arrivals with bad residuals (note that by doing so, events may then fall below the min arrivals filter)
             if do_remove_outliers:
                 max_evt_resid = self.cfg["algorithm"]["max_event_residual"]
                 max_arr_resid = self.cfg["algorithm"]["max_arrival_residual"]
@@ -2862,18 +2906,16 @@ class InversionIterator(object):
                     logger.info(f"Dropped {dn} events with residual > {max_evt_resid}. {n0-dn} remain.   ###")
 
             # Drop events without minimum number of arrivals
-            #  (should we be removing events that fall lower than min arrivals AFTER the initial check? up for debate)
-            """
+            # Important to do this here after track_residual_improvement!
             min_narrival = self.cfg["algorithm"]["min_narrival"]
             n0 = len(self.events)
             counts = self.arrivals["event_id"].value_counts()
-            counts = counts[(counts >= min_narrival) | (counts == 1)] # also let singular (e.g. teleseisms) pass. can probably also check by depth RCP
+            counts = counts[(counts >= min_narrival) | (counts == 1)] # also let singular (e.g. teleseisms) pass
             event_ids = counts.index
             self.events = self.events[self.events["event_id"].isin(event_ids)]
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(f"Dropped {dn} events with < {min_narrival} arrivals. {n0-dn} remain.")
-            """
 
             # Drop arrivals without events
             n0 = len(self.arrivals)
@@ -2892,7 +2934,7 @@ class InversionIterator(object):
                 logger.info(f"Dropped {dn} events without associated arrivals. {n0-dn} remain.   ###")
 
             if len(self.stations) == 0:
-                logger.error("All stations were dropped!!") # I guess we aren't really testing stations for RE-sanitize but maybe we should be
+                logger.error("All stations were dropped!!") # we aren't really testing stations for RE-sanitize but maybe we should be
             if len(self.events) == 0:
                 logger.error("All events were dropped!!")
             if len(self.arrivals) == 0:
@@ -2906,9 +2948,7 @@ class InversionIterator(object):
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def save_events(self):
-        """
-        Save the current "events", and "arrivals" to and HDF5 file using pandas.HDFStore
-        """
+        """ Save the current "events", and "arrivals" to and HDF5 file using pandas.HDFStore """
         logger.info(f"Saving event data from iteration #{self.iiter}")
 
         path = os.path.join(self.cfg['model']['output_dir'], f"{self.iiter:02d}")
@@ -3093,7 +3133,7 @@ class InversionIterator(object):
                         _arrivals = arrivals.loc[(network, station, phase)]
                         _events = events.loc[_arrivals["event_id"].values]
                         arrival_times = _arrivals["time"].values
-
+                        delta = _arrivals["delta"].values
                         origin_times = _events["time"].values
                         coords = _events[["latitude", "longitude", "depth"]].values
                         coords = geo2sph(coords)
@@ -3105,7 +3145,8 @@ class InversionIterator(object):
                             event_id=_arrivals["event_id"].values,
                             arrival_id=_arrivals["arrival_id"].values,
                             time=arrival_times,
-                            residual=residuals
+                            residual=residuals,
+                            delta=delta
                         )
                         _arrivals = pd.DataFrame(_arrivals)
                         updated_arrivals = pd.concat([updated_arrivals, _arrivals])
@@ -3136,7 +3177,7 @@ class InversionIterator(object):
             # A mean is great, but suffers if data is poor (fat, skewed, or multimodal distribution).
             # Over time a "clipped mean" seems to perform best for both synthetic and real data,
             #  but let users experiment themselves
-            # Original code was a pure median
+            # Original v1 code was a pure median
 
             trim_fraction = self.cfg["algorithm"].get("stack_trim_percent", 0)
             trim_fraction = np.clip(float(trim_fraction/100),0,0.9) # cap at 90%!

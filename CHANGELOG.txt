@@ -1,7 +1,15 @@
+V2.0.3
+- Fix issue where arrivals were distance filtered from entire database.
+  They should only be removed from inversion/kde/meshing
+- Update LINEAR weighting logic
+- Lower track_residual_improvement cutoff to -1%, skip event check for 1st iteration
+- Adjust events/arrivals KDE weight scheme
+
 V2.0.2
 - Add solver weighting scheme based on arrival residual (user adjustable)
 - Add params/options for model update via realizations stacking (user adjustable)
 - Reduce default vertical res test smoothing to 2*dz
+- Make default "safe residual" to mean-std rather than hardwired value
 
 V2.0.1
 - Move some CLI arguments to config file (breaking change!)
@@ -15,7 +23,8 @@ V2.0.0
 - Added automatic "checkerboard" model generation & resolution testing
 - Added ability to perform joint teleseismic inversions
 - Added adaptive meshing 
-- Added "source_id" to events to track for external QC- poor performing events/arrivals automatically removed and logged
+- Added "source_id" to events to track for external QC-
+  poor performing events/arrivals automatically removed and logged
 - Expand parameter features & abilities
 - Expanded LSMR information and iterative solution logging
 - Automatic LSMR damping calculator 

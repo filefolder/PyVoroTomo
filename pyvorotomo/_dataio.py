@@ -27,8 +27,15 @@ def parse_event_data(cfg):
 
     path = cfg["model"]["events_path"]
 
-    events = pd.read_hdf(path, key="events")
-    arrivals = pd.read_hdf(path, key="arrivals")
+    try:
+        events   = pd.read_hdf(path, key="events")
+        arrivals = pd.read_hdf(path, key="arrivals")
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not load event file '{path}'. "
+            f"This may be due to an incompatible version of PyTables. "
+            f"Original error: {e}"
+        ) from e
 
     if 'arrival_id' not in arrivals.keys():
         arrivals['arrival_id'] = range(len(arrivals))

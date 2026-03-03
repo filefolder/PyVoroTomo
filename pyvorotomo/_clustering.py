@@ -95,4 +95,4 @@ def k_medians(k, points, model_bounds, max_iter=15, change_threshold=0.01):
     # Convert back to spherical coordinates
     medians_sph = pykonal.transformations.xyz2sph(medians, origin=(0, 0, 0))
 
-    return medians_sph
+    return medians_sph, k

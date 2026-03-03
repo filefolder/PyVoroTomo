@@ -17,7 +17,7 @@ requires_python = ">=3.10"
 packages        = ["pyvorotomo"]
 required        = [
     "KDEpy>=1.1.12",
-    "mpi4py>=4.0",
+    "mpi4py>=4.1.0",
     "numpy>=2.4.0",
     "pandas",
     "pykonal>=0.5.0",
@@ -57,6 +57,10 @@ setup(
         "Programming Language :: Python",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Programming Language :: Python :: Implementation :: CPython",
         "Topic :: Scientific/Engineering :: Physics"
     ]

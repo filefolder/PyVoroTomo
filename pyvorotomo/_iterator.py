@@ -56,6 +56,8 @@ class InversionIterator(object):
         self._swave_model = None
         self._pwave_realization_stack = None
         self._swave_realization_stack = None
+        self._pwave_1d_stack = None
+        self._swave_1d_stack = None
         self._pwave_variance = None
         self._swave_variance = None
         self._pwave_quality = None
@@ -421,7 +423,7 @@ class InversionIterator(object):
 
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
-    def _compute_model_update(self, phase, min_rays=3, use_weights=True):
+    def _compute_model_update(self, phase, min_rays=3, use_weights=True, compute_1d=False):
         """
         Compute the model update for a single realization and appends
         the results to the realization stack.
@@ -575,6 +577,59 @@ class InversionIterator(object):
         else:
             self.swave_realization_stack[self.ireal] = delta_slowness
             self.squal_realization_stack[self.ireal] = global_quality
+        
+        # Also calculate a 1D model?
+        if compute_1d:
+            nz = model.npts[0]
+
+            # Lazy init of the 1D realization stack
+            stack_attr = f"_{phase.lower()}wave_1d_stack"
+            if getattr(self, stack_attr) is None:
+                nreal = self.cfg["algorithm"]["nreal"]
+                setattr(self, stack_attr, np.full((nreal, nz), np.nan))
+
+            # Map each Voronoi cell to its nearest depth bin (radial node index)
+            bin_indices = np.round(
+                (self.voronoi_cells[:, 0] - model.min_coords[0])
+                / model.node_intervals[0]
+            ).astype(int)
+            bin_indices = np.clip(bin_indices, 0, nz - 1)
+
+            # Aggregation matrix: (nvoronoi, nz)
+            # Columns of sensitivity_voronoi that share the same depth bin
+            # are summed together to form the 1D sensitivity column.
+            agg = scipy.sparse.coo_matrix(
+                (np.ones(nvoronoi), (np.arange(nvoronoi), bin_indices)),
+                shape=(nvoronoi, nz)
+            ).tocsr()
+
+            # 1D sensitivity matrix: (nray, nz)
+            # Reuse the already-sliced sensitivity_voronoi matrix
+            sensitivity_1d = sensitivity_voronoi @ agg
+
+            # Apply the same residual weights 3D
+            if use_weights and solver_weight_blend_factor > 0:
+                weighted_sensitivity_1d = weight_matrix @ sensitivity_1d
+            else:
+                weighted_sensitivity_1d = sensitivity_1d
+
+            # Solve — use scalar damp (mean of per-cell damp if auto, else as-is)
+            result_1d = scipy.sparse.linalg.lsmr(
+                weighted_sensitivity_1d, weighted_residuals,
+                damp=damp, atol=atol, btol=btol, conlim=conlim,
+                maxiter=maxiter, show=False
+            )
+            x_1d, istop_1d, itn_1d, normr_1d, normar_1d, norma_1d, conda_1d, normx_1d = result_1d
+
+            logger.info(f"  1D ||G||         = {norma_1d:8.2f}  (sensitivity matrix mag)")
+            logger.info(f"  1D ||Gm-d||      = {normr_1d:8.2f}  (residual norm)")
+            logger.info(f"  1D ||m||         = {normx_1d:8.3f}  (solution norm)")
+            logger.info(f"  1D ||G^-1||||G|| = {conda_1d:8.2f}  (condition estimate)")
+            logger.info(f"  1D est/used damp = {np.std(weighted_residuals)/conda_1d:.4e} / {damp:.4e}")
+            logger.info(f"  1D itn           = {itn_1d}")
+
+            stack_1d = getattr(self, stack_attr)
+            stack_1d[self.ireal] = x_1d
 
         return True
 
@@ -845,7 +900,7 @@ class InversionIterator(object):
 
                         # Run k-medians clustering in model coordinates
                         model_bounds = (min_coords, max_coords)
-                        medians = _clustering.k_medians(kvoronoi, points, model_bounds)
+                        medians, kvoronoi = _clustering.k_medians(kvoronoi, points, model_bounds) # update kvoronoi here (e.g. if truncated)
 
                         # Verify medians are within bounds
                         medians = np.clip(medians, min_coords, max_coords)
@@ -1511,18 +1566,24 @@ class InversionIterator(object):
         min_improvement is a fraction (e.g. -.05 = -5%).
           Arrivals/Events must not degrade further than this
 
-        Safe_residual in seconds
+        Safe_residual in seconds, applies for both event/arrival
 
-        If safe_residual not set (default), assume: mean with floor of 0.3 seconds
+        If safe_residual not set (default), assume: mean with floor of 0.25 seconds
             (e.g. residuals under this don't _need_ to improve)
         """
 
         if RANK == ROOT_RANK:
             logger.info(f"Tracking residuals for iteration {self.iiter}...   ###")
 
+            # Hardwire "safe" residual changes regardless of starting point
+            min_arr_abs_change = 0.10
+            min_evt_abs_change = 0.07
+
             # Cold start
             if self.iiter <= 1:
-                min_improvement = -0.20
+                min_improvement = -0.15
+                min_arr_abs_change = 0.3
+                min_evt_abs_change = 0.15
 
             current_arrival_ids = set(self.arrivals['arrival_id'])
             current_event_ids = set(self.events['event_id'])
@@ -1559,14 +1620,20 @@ class InversionIterator(object):
             if not safe_residual:
                 mean_residual = np.mean(curr_arrival_residuals)
                 #std_residual = np.std(curr_arrival_residuals)
-                safe_residual = max(0.3, mean_residual)
+                safe_arr_residual = max(0.25, mean_residual)
 
-            # Only check improvement for arrivals with residuals above safe_residual
-            significant_arrival_mask = prev_arrival_residuals > safe_residual
+            # Only check improvement for arrivals with residuals above safe_arr_residual
+            significant_arrival_mask = prev_arrival_residuals > safe_arr_residual
             arrival_improvement = (prev_arrival_residuals - curr_arrival_residuals) / (prev_arrival_residuals + 1e-6)
 
-            # Only remove if residual is above safe_residual AND not improving
-            arrival_mask_to_remove = significant_arrival_mask & (arrival_improvement < min_improvement)
+            # Only remove if residual is above safe_arr_residual AND not improving AND change is greater than min_arr_abs_change
+            #arrival_mask_to_remove = significant_arrival_mask & (arrival_improvement < min_improvement)
+            arrival_abs_change = (prev_arrival_residuals - curr_arrival_residuals).abs()
+            arrival_mask_to_remove = (
+                significant_arrival_mask 
+                & (arrival_improvement < min_improvement) 
+                & (arrival_abs_change > min_arr_abs_change)
+            )
             arrivals_to_remove = self.arrival_history.loc[arrival_mask_to_remove, 'arrival_id'].values
 
             # Calculate mean improvement using mean of residuals
@@ -1585,14 +1652,20 @@ class InversionIterator(object):
             if not safe_residual:
                 mean_residual = np.mean(curr_event_residuals)
                 #std_residual = np.std(curr_event_residuals)
-                safe_residual = max(0.3, mean_residual - std_residual)
+                safe_evt_residual = max(0.25, mean_residual)
 
-            # Only check improvement for events with residuals above safe_residual
-            significant_event_mask = prev_event_residuals > safe_residual
+            # Only check improvement for events with residuals above safe_evt_residual
+            significant_event_mask = prev_event_residuals > safe_evt_residual
             event_improvement = (prev_event_residuals - curr_event_residuals) / (prev_event_residuals + 1e-6)
 
-            # Only remove if residual is above safe_residual AND not improving
-            event_mask_to_remove = significant_event_mask & (event_improvement < min_improvement)
+            # Only remove if residual is above safe_evt_residual AND not improving AND change is greater than min_evt_abs_change
+            #event_mask_to_remove = significant_event_mask & (event_improvement < min_improvement)
+            event_abs_change = (prev_event_residuals - curr_event_residuals).abs()
+            event_mask_to_remove = (
+                significant_event_mask 
+                & (event_improvement < min_improvement) 
+                & (event_abs_change > min_evt_abs_change)
+            )
             events_to_remove = self.event_history.loc[event_mask_to_remove, 'event_id'].values
 
             # Calculate mean improvement using mean of residuals
@@ -2064,11 +2137,18 @@ class InversionIterator(object):
 
         if self.iiter == 1:
             self.save_stations() # save the first filtered station for sharing/etc
+        
+        # determine if we will also compute a 1D velocity model on the last iteration
+        do_compute_1d = False
+        if self.iiter == niter:
+            do_compute_1d = self.cfg["model"].get("output_1d_model", True)
 
         self.check_event_bounds()
 
         for phase in phase_order:
             logger.info(f" >>> Starting {phase}-wave iteration {self.iiter}/{niter} <<<")
+            if do_compute_1d:
+                logger.info("  * Also calculating 1D model on this iteration")
 
             self._reset_realization_stack(phase)
        
@@ -2088,9 +2168,9 @@ class InversionIterator(object):
                 self._generate_voronoi_cells(phase,mod_kvoronoi,mod_nvoronoi,alpha,adaptive_weight,density_to_gradient_weight) # only takes a few sec usually
                 self._compute_sensitivity_matrix(phase,hvr)
                 self._update_projection_matrix(phase,hvr)
-                self._compute_model_update(phase,min_rays=min_rays_per_cell)
+                self._compute_model_update(phase,min_rays=min_rays_per_cell,compute_1d=do_compute_1d)
 
-            self.update_model(phase)
+            self.update_model(phase,compute_1d=do_compute_1d)
 
             if not self.argc.test_only:
                 self.save_model(phase, tag=f"h{hvr}")
@@ -2963,8 +3043,8 @@ class InversionIterator(object):
         for column in ARRIVAL_DTYPES:
             arrivals[column] = arrivals[column].astype(ARRIVAL_DTYPES[column])
 
-        events.to_hdf(f"{path}.events.h5", key="events")
-        arrivals.to_hdf(f"{path}.events.h5", key="arrivals")
+        events.to_hdf(f"{path}.events.h5", key="events", complevel=5, complib="zlib")
+        arrivals.to_hdf(f"{path}.events.h5", key="arrivals", complevel=5, complib="zlib")
 
         return True
 
@@ -2980,7 +3060,7 @@ class InversionIterator(object):
 
         path = os.path.join(self.cfg['model']['output_dir'], f"{self.iiter:02d}")
 
-        self.stations.to_hdf(f"{path}.stations.h5", key="stations")
+        self.stations.to_hdf(f"{path}.stations.h5", key="stations", complevel=5, complib="zlib")
 
         return True
 
@@ -3157,7 +3237,7 @@ class InversionIterator(object):
 
 
     @_utilities.log_errors(logger)
-    def update_model(self, phase):
+    def update_model(self, phase, compute_1d=False):
         """
         Perform stack statistics to update our model
         """
@@ -3213,6 +3293,9 @@ class InversionIterator(object):
 
             # Apply velocity guardrails here? +/- 20% or something? TODO / probably unncessary
 
+            if compute_1d:
+                ref_slowness_1d = np.nanmean(1.0 / model.values, axis=(1, 2))  # (nz,)
+
             # Update model in slowness, then convert back to velocity
             values = np.power(model.values, -1) + delta_slowness
             velocities = np.power(values, -1)
@@ -3236,6 +3319,68 @@ class InversionIterator(object):
             # Keep track of mean? median? so we can monitor throughout the iterations
             self._max_variance_km_s = np.mean( np.sqrt(velocity_variance) )
             logger.info(f"Mean {phase.upper()} velocity variance (km/s): {self._max_variance_km_s:0.6f}   ###")
+
+            # Also calculate a 1D version using same method as 3D? It is fast and fun as well,
+            if compute_1d:
+                stack_1d   = getattr(self, f"_{phase}wave_1d_stack")
+                stack_1d_ma = np.ma.masked_invalid(stack_1d)
+
+                # Same trim as 3D stack
+                if trim_fraction > 0:
+                    nreal_1d = stack_1d_ma.shape[0]
+                    n_trim   = int(nreal_1d * trim_fraction)
+                    if n_trim > 0 and nreal_1d > 2 * n_trim:
+                        sorted_1d  = np.ma.sort(stack_1d_ma, axis=0)
+                        trimmed_1d = sorted_1d[n_trim:-n_trim, :]
+                    else:
+                        trimmed_1d = stack_1d_ma
+                else:
+                    trimmed_1d = stack_1d_ma
+
+                if stack_type.lower() == "median":
+                    delta_slowness_1d = np.ma.median(trimmed_1d, axis=0).filled(np.nan)
+                else:
+                    delta_slowness_1d = np.ma.mean(trimmed_1d, axis=0).filled(np.nan)
+
+                delta_slowness_std = np.ma.std(trimmed_1d, axis=0).filled(np.nan)
+                #n_contributing     = (~np.ma.getmaskarray(trimmed_1d)).sum(axis=0) # this is always the same/not too useful (TODO)
+
+                # Convert delta-slowness to absolute velocity using the
+                # updated 3D model laterally averaged at each depth node.
+                # model.values is (nz, ntheta, nphi) — mean over lateral dims.
+                abs_slowness_1d = ref_slowness_1d + delta_slowness_1d
+                velocity_1d     = np.where(abs_slowness_1d > 0, 1.0 / abs_slowness_1d, np.nan)
+
+                # Uncertainty: propagate slowness std to velocity std
+                # Var(1/s) ≈ Var(s) * v^4  =>  std(v) ≈ std(s) * v^2
+                velocity_std_1d = delta_slowness_std * np.where(
+                    np.isfinite(velocity_1d), velocity_1d ** 2, np.nan
+                )
+
+                # Depth axis: same convention as 3D grid
+                nz        = model.npts[0]
+                rho_nodes = model.min_coords[0] + np.arange(nz) * model.node_intervals[0]
+                depth_km  = _constants.EARTH_RADIUS - rho_nodes  # positive downward
+
+                df_1d = pd.DataFrame({
+                    "depth_km":          np.around(depth_km,3),
+                    "velocity_km_s":     np.around(velocity_1d,3),
+                    "velocity_std_km_s": np.around(velocity_std_1d,5),
+                    #"n_realizations":    n_contributing,
+                })
+                df_1d = df_1d.sort_values("depth_km").reset_index(drop=True) # shallow first
+
+                path_1d = os.path.join(
+                    self.cfg["model"]["output_dir"],
+                    f"{self.iiter:02d}.{phase}wave_model.1d.csv"
+                )
+                df_1d.to_csv(path_1d, index=False)
+                logger.info(
+                    f"Saved 1D {phase.upper()}-wave model to {path_1d}  "
+                    f"({np.isfinite(velocity_1d).sum()}/{nz} depth bins covered)   ###"
+                )
+
+                setattr(self, f"_{phase}wave_1d_stack", None) # free up memory although should be trivial
 
         self.synchronize(attrs=[f"{phase}wave_model"])
         return True

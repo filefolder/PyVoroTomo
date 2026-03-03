@@ -165,16 +165,6 @@ def parse_args():
 
     parser = ArgumentParser()
 
-    #parser.add_argument(
-    #    "events",
-    #    type=str,
-    #    help="Input event (origins and phases) data file in HDF5 format."
-    #)
-    #parser.add_argument(
-    #    "network",
-    #    type=str,
-    #    help="Input network geometry file in HDF5 format."
-    #)
     parser.add_argument(
         "-c",
         "--configuration_file",
@@ -182,31 +172,12 @@ def parse_args():
         default=f"{parser.prog}.cfg",
         help="Configuration file."
     )
-    #parser.add_argument(
-    #    "-l",
-    #    "--log_file",
-    #    type=str,
-    #    help="Log file."
-    #)
-    #parser.add_argument(
-    #    "-o",
-    #    "--output_dir",
-    #    type=str,
-    #    default=f"output_{stamp}",
-    #    help="Output directory."
-    #)
     parser.add_argument(
         "-r",
         "--relocate_first",
         action="store_true",
         help="Relocate events before first model update."
     )
-    #parser.add_argument(
-    #    "-s",
-    #    "--scratch_dir",
-    #    type=str,
-    #    help="Scratch directory."
-    #)
     parser.add_argument(
         "-t",
         "--test_only",
@@ -228,9 +199,6 @@ def parse_args():
 
     args = parser.parse_args()
 
-    #if args.log_file is None:
-    #    args.log_file = os.path.join(cfg.output_dir, f"{parser.prog}.log")
-
     for attr in (
         #"events",
         #"network",
@@ -242,15 +210,6 @@ def parse_args():
         _attr = getattr(args, attr)
         _attr = os.path.abspath(_attr)
         setattr(args, attr, _attr)
-
-
-    #if RANK == _constants.ROOT_RANK:
-    #    os.makedirs(args.output_dir, exist_ok=True)
-
-    #if args.scratch_dir is not None:
-    #    args.scratch_dir = os.path.abspath(args.scratch_dir)
-    #    if RANK == _constants.ROOT_RANK:
-    #        os.makedirs(args.scratch_dir, exist_ok=True)
 
     COMM.barrier()
 
@@ -477,6 +436,7 @@ def parse_cfg(configuration_file):
     )
     cfg["algorithm"] = _cfg
 
+
     _cfg = dict()
 
     output_label = parser.get(
@@ -513,7 +473,6 @@ def parse_cfg(configuration_file):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(scratch_dir, exist_ok=True)
 
-
     stations_path = parser.get(
         "model",
         "stations_path"
@@ -542,8 +501,6 @@ def parse_cfg(configuration_file):
     initial_swave_path = os.path.abspath(initial_swave_path)
     _cfg["initial_swave_path"] = initial_swave_path
 
-    cfg["model"] = _cfg
-
     map_filter_string = parser.get(
         "model",
         "map_filter",
@@ -551,17 +508,16 @@ def parse_cfg(configuration_file):
     )
     _cfg["map_filter"] = [float(x.strip()) for x in map_filter_string.split(",")] if map_filter_string else ''
 
-
-    perform_res_test = parser.get(
+    _cfg["output_1d_model"] = parser.getboolean(
         "model",
-        "perform_res_test"
+        "output_1d_model",
+        fallback=True
     )
     _cfg["perform_res_test"] = parser.getboolean(
         "model",
         "perform_res_test",
         fallback=False
     )
-
     res_test_string = parser.get(
         "model",
         "res_test_size_mag",
@@ -577,7 +533,6 @@ def parse_cfg(configuration_file):
     _cfg["res_test_layers"] = (
         [float(x.strip()) for x in res_test_layers_string.split(",")]
     )
-
     rerun_restest = parser.get(
         "model",
         "rerun_restest",
@@ -587,6 +542,9 @@ def parse_cfg(configuration_file):
         _cfg["rerun_restest"] = os.path.abspath(rerun_restest)
     else:
         _cfg["rerun_restest"] = ''
+
+    cfg["model"] = _cfg
+
 
     _cfg = dict()
     _cfg["method"] = parser.get(
@@ -616,7 +574,7 @@ def parse_cfg(configuration_file):
             "linearized_relocation",
             "damp"
         )
-    elif _cfg["method"].upper() == "DE":
+    elif _cfg["method"] == "DE":
         _cfg["depth_min"] = parser.getfloat(
             "de_relocation",
             "depth_min"
@@ -652,8 +610,6 @@ def write_cfg(argc, cfg):
     """
     Write the execution configuration to disk for later reference.
     """
-    
-    #output_dir = argc.output_dir
     output_dir = cfg['model']['output_dir']
 
     parser = configparser.ConfigParser()

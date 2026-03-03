@@ -1,8 +1,14 @@
+V2.0.4
+- Add option to also generate a 1D velocity model during final iteration
+- Fix bug in residual tracking which over-removed events
+- Fix bug in generate_voronoi_cells & clustering.k_medians where kvoronoi not being updated if greater than ncells
+- Force zlib compression in to_hdf to avoid pytables compatibility issues
+
 V2.0.3
 - Fix issue where arrivals were distance filtered from entire database.
   They should only be removed from inversion/kde/meshing
 - Update LINEAR weighting logic
-- Lower track_residual_improvement cutoff to -1%, skip event check for 1st iteration
+- Lower track_residual_improvement cutoff to -5%, soften check for 1st iteration
 - Adjust events/arrivals KDE weight scheme
 
 V2.0.2

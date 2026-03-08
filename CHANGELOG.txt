@@ -1,8 +1,10 @@
-V2.0.4
+V2.0.4b
 - Add option to also generate a 1D velocity model during final iteration
 - Fix bug in residual tracking which over-removed events
 - Fix bug in generate_voronoi_cells & clustering.k_medians where kvoronoi not being updated if greater than ncells
 - Force zlib compression in to_hdf to avoid pytables compatibility issues
+- Strengthen logic in resanitize_data and relocate_events to catch dropped events
+- Adjust -inf traveltime logging to better locate problem event_ids
 
 V2.0.3
 - Fix issue where arrivals were distance filtered from entire database.

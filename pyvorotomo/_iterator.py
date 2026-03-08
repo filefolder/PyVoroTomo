@@ -1538,15 +1538,14 @@ class InversionIterator(object):
                                 continue
 
                         except Exception as e:
-                            logger.warning(f"traveltime issue with event_id {event_id}, coords {coords}, {network}, {station}, {phase}\n {e}")
-
+                            logger.warning(f"traveltime issue with event_id {event_id} {network}.{station}.{phase}: {e} setting to a safe value   ###")
                             try:
                                 min_val = np.min(traveltime.values[~np.isinf(traveltime.values)])
                                 # Replacing inf tt's to a hair under the min should be functionally equivalent
-                                traveltime.values[traveltime.values == -np.inf] = 0.97 * min_val
+                                traveltime.values[traveltime.values == -np.inf] = 0.98 * min_val
                                 raypath = traveltime.trace_ray(coords)
                                 dataset[:, idx] = raypath.T
-                                logger.warning("...success on second try!")
+                                #logger.warning("...success on second try!")
                             except Exception as e:
                                 logger.warning("...couldn't fix traveltime: ", e)
                                 continue
@@ -1558,12 +1557,12 @@ class InversionIterator(object):
 
 
     @_utilities.log_errors(logger)
-    def track_residual_improvement(self, min_improvement=-0.05, safe_residual=None):
+    def track_residual_improvement(self, min_improvement=-0.02, safe_residual=None):
         """
         Track arrival and event residuals per iteration,
         remove if above safe_residual AND not improving. Meant to just remove clearly bad stuff.
 
-        min_improvement is a fraction (e.g. -.05 = -5%).
+        min_improvement is a fraction (e.g. -0.05 = -5%).
           Arrivals/Events must not degrade further than this
 
         Safe_residual in seconds, applies for both event/arrival
@@ -1575,15 +1574,9 @@ class InversionIterator(object):
         if RANK == ROOT_RANK:
             logger.info(f"Tracking residuals for iteration {self.iiter}...   ###")
 
-            # Hardwire "safe" residual changes regardless of starting point
-            min_arr_abs_change = 0.10
-            min_evt_abs_change = 0.07
-
             # Cold start
             if self.iiter <= 1:
                 min_improvement = -0.15
-                min_arr_abs_change = 0.3
-                min_evt_abs_change = 0.15
 
             current_arrival_ids = set(self.arrivals['arrival_id'])
             current_event_ids = set(self.events['event_id'])
@@ -1620,20 +1613,16 @@ class InversionIterator(object):
             if not safe_residual:
                 mean_residual = np.mean(curr_arrival_residuals)
                 #std_residual = np.std(curr_arrival_residuals)
-                safe_arr_residual = max(0.25, mean_residual)
+                safe_arr_residual = max(0.3, mean_residual)
+            else:
+                safe_arr_residual = safe_residual
 
             # Only check improvement for arrivals with residuals above safe_arr_residual
             significant_arrival_mask = prev_arrival_residuals > safe_arr_residual
             arrival_improvement = (prev_arrival_residuals - curr_arrival_residuals) / (prev_arrival_residuals + 1e-6)
 
-            # Only remove if residual is above safe_arr_residual AND not improving AND change is greater than min_arr_abs_change
-            #arrival_mask_to_remove = significant_arrival_mask & (arrival_improvement < min_improvement)
-            arrival_abs_change = (prev_arrival_residuals - curr_arrival_residuals).abs()
-            arrival_mask_to_remove = (
-                significant_arrival_mask 
-                & (arrival_improvement < min_improvement) 
-                & (arrival_abs_change > min_arr_abs_change)
-            )
+            # Only remove if residual is above safe_arr_residual AND not improving
+            arrival_mask_to_remove = significant_arrival_mask & (arrival_improvement < min_improvement)
             arrivals_to_remove = self.arrival_history.loc[arrival_mask_to_remove, 'arrival_id'].values
 
             # Calculate mean improvement using mean of residuals
@@ -1652,20 +1641,16 @@ class InversionIterator(object):
             if not safe_residual:
                 mean_residual = np.mean(curr_event_residuals)
                 #std_residual = np.std(curr_event_residuals)
-                safe_evt_residual = max(0.25, mean_residual)
+                safe_evt_residual = max(0.2, mean_residual)
+            else:
+                safe_evt_residual = safe_residual
 
             # Only check improvement for events with residuals above safe_evt_residual
             significant_event_mask = prev_event_residuals > safe_evt_residual
             event_improvement = (prev_event_residuals - curr_event_residuals) / (prev_event_residuals + 1e-6)
 
-            # Only remove if residual is above safe_evt_residual AND not improving AND change is greater than min_evt_abs_change
-            #event_mask_to_remove = significant_event_mask & (event_improvement < min_improvement)
-            event_abs_change = (prev_event_residuals - curr_event_residuals).abs()
-            event_mask_to_remove = (
-                significant_event_mask 
-                & (event_improvement < min_improvement) 
-                & (event_abs_change > min_evt_abs_change)
-            )
+            # Only remove if residual is above safe_evt_residual AND not improving
+            event_mask_to_remove = significant_event_mask & (event_improvement < min_improvement)
             events_to_remove = self.event_history.loc[event_mask_to_remove, 'event_id'].values
 
             # Calculate mean improvement using mean of residuals
@@ -2069,11 +2054,12 @@ class InversionIterator(object):
                     solver.src_loc = coords
                     solver.solve() # we're seeing -inf traveltimes
 
-                    # only way to sniff these out is via a separate script unfortunately
-                    if solver.tt.values.min() == -np.inf:  # fixes the few trouble arrivals
-                        logger.warn(f"-inf values found in solver.tt for {network}.{station}.{phase} ...no problem, setting these to a safe value")
-                        min_val = np.min(solver.tt.values[~np.isinf(solver.tt.values)])
-                        solver.tt.values[solver.tt.values == -np.inf] = 0.97 * min_val
+                    # keeping the inf values, now catching them in update_arrival_residuals
+                    #if solver.tt.values.min() == -np.inf:  # fixes the few trouble arrivals
+                    #    logger.warn(f"-inf values found in solver.tt for {network}.{station}.{phase} ...no problem, setting these to a safe value")
+                    #    min_val = np.min(solver.tt.values[~np.isinf(solver.tt.values)])
+                    #    solver.tt.values[solver.tt.values == -np.inf] = 0.97 * min_val
+
                     path = os.path.join(traveltime_dir,f"{network}.{station}.{phase}.h5")
                     solver.tt.to_hdf(path)
 
@@ -2420,6 +2406,15 @@ class InversionIterator(object):
             else:
                 raise (ValueError("Relocation method must be either 'linear' or 'DE'"))
 
+        if RANK == ROOT_RANK:
+            n0 = len(self.arrivals)
+            bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])
+            self.arrivals = self.arrivals[bool_idx]
+            dn = n0 - len(self.arrivals)
+            if dn > 0:
+                logger.warning(f"Dropped {dn} arrivals for {dn} events lost during relocation (!). {n0-dn} remain.   ###")
+        self.synchronize(attrs=["arrivals"])
+
         # After relocating events, update arrival residuals also
         self.update_arrival_residuals()
 
@@ -2646,7 +2641,7 @@ class InversionIterator(object):
                             loc = locator.locate(initial, delta)
 
                     except Exception as e:
-                        logger.debug(f"Location failed for event {event_id}: {str(e)}")
+                        logger.warning(f"Location failed for event {event_id}: {str(e)}")
                         raise
 
                     # Get residual RMS, reformat, append to relocated_events dataframe
@@ -2985,6 +2980,13 @@ class InversionIterator(object):
                     dn = n0 - len(self.events)
                     logger.info(f"Dropped {dn} events with residual > {max_evt_resid}. {n0-dn} remain.   ###")
 
+                n0 = len(self.arrivals)
+                bool_idx = self.arrivals["event_id"].isin(self.events["event_id"])
+                self.arrivals = self.arrivals[bool_idx]
+                dn = n0 - len(self.arrivals)
+                if dn > 0:
+                    logger.info(f"Dropped {dn} arrivals linked to outlier-removed events. {n0-dn} remain.   ###")
+
             # Drop events without minimum number of arrivals
             # Important to do this here after track_residual_improvement!
             min_narrival = self.cfg["algorithm"]["min_narrival"]
@@ -3172,11 +3174,15 @@ class InversionIterator(object):
 
             # Sometimes NaNs sneak in as residuals,
             #   usually if the source or station is near or eclipses model boundary?
-            n0 = len(arrivals)
+            nan_mask = arrivals['residual'].isna()
+            if nan_mask.any():
+                bad = arrivals[nan_mask]
+                logger.info(
+                    f"Dropped {nan_mask.sum()} arrivals with NaN residuals. "
+                    f"event_ids: {bad['event_id'].unique()}, "
+                    f"arrival_ids: {bad['arrival_id'].unique()}   ###"
+                )
             arrivals = arrivals.dropna(subset=['residual'])
-            dn = n0 - len(arrivals)
-            if dn > 0:
-                logger.info(f"Dropped {dn} arrivals with NaN residuals (likely near/past model bounds)")
 
             self.arrivals = arrivals
 

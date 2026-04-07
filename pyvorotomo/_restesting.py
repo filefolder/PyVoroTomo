@@ -24,7 +24,7 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
 
     # Hardwire vertical smoothing
     dz = base_model.node_intervals[0] 
-    vertical_smooth_km = 2 * dz  # turns OFF at 1 * dz. SOME smoothing shows benefit over a sharp boundary.
+    vertical_smooth_km = 2 * dz  # turns OFF at 1 * dz. Smoothing shows benefit over a sharp boundary.
 
     logger.info(f"Creating checkerboard with {horiz_block_size_km}km horizontal,"
      f" {vertical_layers}km vertical blocks, {vertical_smooth_km:.1f}km vertical smoothing, {amplitude} amplitude   ###")
@@ -63,6 +63,7 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
         vert_sign_array = convolve1d(vert_sign_array, kernel, mode='nearest')
 
     # Now build full CB model
+    """
     for iz in range(nz):
         for iy in range(ny):
             for ix in range(nx):
@@ -78,6 +79,17 @@ def _create_checkerboard_model(base_model, horiz_block_size_km,
 
                 perturbation = vert_component * theta_component * phi_component
                 checkerboard_values[iz, iy, ix] *= (1.0 + amplitude * perturbation)
+    """
+    # build CB model (vectorized)
+    theta = min_coords[1] + np.arange(ny) * base_model.node_intervals[1]
+    phi   = min_coords[2] + np.arange(nx) * base_model.node_intervals[2]
+
+    theta_comp = np.cos(2 * np.pi * (theta - min_coords[1]) / angular_wavelength)
+    phi_comp   = np.cos(2 * np.pi * (phi   - min_coords[2]) / angular_wavelength)
+
+    # Shape: (nz, ny, nx) via broadcasting
+    perturbation = vert_sign_array[:, None, None] * theta_comp[None, :, None] * phi_comp[None, None, :]
+    checkerboard_values *= (1.0 + amplitude * perturbation)
 
     checkerboard_model.values = checkerboard_values
     return checkerboard_model
@@ -118,7 +130,7 @@ def _extract_recovered_model(iterator, phase):
 
     return recovered_model
 
-# this needs work
+
 def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model):
     """Analyze checkerboard resolution test results with more appropriate metrics."""
 
@@ -143,8 +155,8 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
     boundary_mask[:, :, :margin] = False
     boundary_mask[:, :, -margin:] = False
 
-    # Also require some minimum absolute perturbation
-    signal_threshold = 0.01
+    # Also require some minimum absolute perturbation-- there are a lot of zero crossings between checkers so keep sort of low
+    signal_threshold = 0.005
     significant_input = np.abs(input_pert) > signal_threshold
 
     # Combine all masks - most importantly the coverage mask
@@ -192,11 +204,6 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
     )
     well_resolved_fraction = np.sum(well_recovered_relaxed) / len(well_recovered_relaxed)
 
-    # Variance reduction (how much pattern variance is explained)
-    input_var = np.var(masked_input)
-    residual_var = np.var(masked_input - masked_recovered)
-    variance_reduction = 1 - (residual_var / input_var) if input_var > 0 else 0
-
     # Add coverage statistics
     n_coverage = np.sum(coverage_mask)
     n_analysis = np.sum(analysis_mask)
@@ -208,7 +215,6 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
         'amplitude_ratio': float(amplitude_ratio),
         'polarity_recovery': float(polarity_recovery),
         'well_resolved_fraction': float(well_resolved_fraction),
-        'variance_reduction': float(variance_reduction),
         'rms_input': float(rms_input),
         'rms_recovered': float(rms_recovered),
         'total_nodes': int(len(input_pert.flatten())),
@@ -219,12 +225,12 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
 
     logger.info(f"Checkerboard resolution results for {phase}:   ###")
     logger.info(f"  Ray coverage: {n_coverage}/{len(input_pert.flatten())} nodes ({coverage_fraction:.1%})   ###")
-    logger.info(f"  Analysis coverage: {n_analysis}/{n_coverage} of covered nodes   ###")
+    analysis_pct = n_analysis / n_coverage if n_coverage > 0 else 0
+    logger.info(f"  Analysis coverage: {n_analysis}/{n_coverage} ({analysis_pct:.1%}) of covered nodes   ###")
     logger.info(f"  Pattern correlation: {correlation:.3f}   ###")
     logger.info(f"  Amplitude recovery: {amplitude_ratio:.3f}   ###")
     logger.info(f"  Polarity recovery: {polarity_recovery:.3f}   ###")
     logger.info(f"  Well-resolved fraction: {well_resolved_fraction:.3f}   ###")
-    logger.info(f"  Variance explained: {variance_reduction:.3f}   ###")
 
     return metrics
 
@@ -352,19 +358,7 @@ def _save_results(output_dir, input_model, recovered_model, metrics, phase, hori
 
 
 def _copy_scalar_field(field):
-    """
-    Create a DEEP copy of a ScalarField3D object
-
-    Parameters:
-    -----------
-    field : _picklabel.ScalarField3D
-        The field to copy
-
-    Returns:
-    --------
-    _picklabel.ScalarField3D
-        A new field object with copied attributes
-    """
+    """Create a DEEP copy of a ScalarField3D object"""
     new_field = _picklabel.ScalarField3D(coord_sys=field.coord_sys)
     new_field.min_coords = field.min_coords.copy()
     new_field.node_intervals = field.node_intervals.copy()

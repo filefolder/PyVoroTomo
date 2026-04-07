@@ -3,7 +3,7 @@
 """
 An MPI script to invert traveltime data for velocity.
 
-.. author:: Malcolm C. A. White, edits by Pickle
+.. author:: Malcolm C. A. White (v1), Robert Pickle (v2)
 .. date:: 2020-04-17, 2025-10-31
 """
 
@@ -98,6 +98,25 @@ def main(argc):
     for phase in inversion_iterator.phases:
         inversion_iterator.save_model(phase)
     inversion_iterator.save_events()
+
+    # Reinitialize history with actual post-relocation residuals
+    # (load_event_data sets iter_0 = 1.0 as a placeholder)
+    if _iterator.RANK == _iterator.ROOT_RANK:
+        inversion_iterator.arrival_history['iter_0'] = (
+            inversion_iterator.arrival_history['arrival_id']
+            .map(dict(zip(
+                inversion_iterator.arrivals['arrival_id'],
+                inversion_iterator.arrivals['residual'].abs()
+            )))
+        )
+        inversion_iterator.event_history['iter_0'] = (
+            inversion_iterator.event_history['event_id']
+            .map(dict(zip(
+                inversion_iterator.events['event_id'],
+                inversion_iterator.events['residual'].abs()
+            )))
+        )
+    inversion_iterator.synchronize(attrs=["arrival_history", "event_history"])
 
     # Run inversion by iterations
     niter = inversion_iterator.cfg["algorithm"]["niter"]

@@ -1,6 +1,6 @@
 # Welcome to the *PyVoroTomo* (version 2!) repository!
 
-## >> this is very much beta code-- use at your own risk! bug reports appreciated<<
+## >> still beta code-- use at your own risk! bug reports appreciated<<
 
 This is a revamped version of the original PyVoroTomo by Fang et al. (2020). This code implements a Poisson Voronoi-based seismic traveltime tomography method, primarily suited for regional or smaller study areas but may also be expanded to do joint teleseismic inversions. See changelog for details. PyKonal (White et al., 2020) is used for calculating traveltimes and tracing rays.
 

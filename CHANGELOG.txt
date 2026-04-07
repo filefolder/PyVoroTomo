@@ -1,14 +1,27 @@
-V2.0.4b
+V2.0.5
+- Reduce redundant work in trace_rays, projected_ray_idxs, compute_sensitivity_matrix
+- Add feature to remove raypaths that bottom between some depth range (ie moho depth)
+- Update KDE weights logic to limit weight on sparse areas
+- Adjust behavior of paretos alpha meshing bias to be linear
+- Limit model update step size for first 3 iteration
+- Change residual tracking outlier removal to be standard deviation based
+- Change automatic forward damping estimate to just use the previous calculated value
+- Remove unnecessary calculations done in debug f-strings
+- Fix bug where initial relocation sigmas weren't being updated for improvement tracking
+- Output station/event diagnostics CSV printouts at the end
+- Add some utility functions
+
+V2.0.4
 - Add option to also generate a 1D velocity model during final iteration
 - Fix bug in residual tracking which over-removed events
-- Fix bug in generate_voronoi_cells & clustering.k_medians where kvoronoi not being updated if greater than ncells
+- Fix bug in generate_voronoi_cells & clustering.k_medians where
+   kvoronoi not being updated if greater than ncells
 - Force zlib compression in to_hdf to avoid pytables compatibility issues
 - Strengthen logic in resanitize_data and relocate_events to catch dropped events
-- Adjust -inf traveltime logging to better locate problem event_ids
 
 V2.0.3
 - Fix issue where arrivals were distance filtered from entire database.
-  They should only be removed from inversion/kde/meshing
+   They should only be removed from inversion/kde/meshing
 - Update LINEAR weighting logic
 - Lower track_residual_improvement cutoff to -5%, soften check for 1st iteration
 - Adjust events/arrivals KDE weight scheme
@@ -32,7 +45,7 @@ V2.0.0
 - Added ability to perform joint teleseismic inversions
 - Added adaptive meshing 
 - Added "source_id" to events to track for external QC-
-  poor performing events/arrivals automatically removed and logged
+   poor performing events/arrivals automatically removed and logged
 - Expand parameter features & abilities
 - Expanded LSMR information and iterative solution logging
 - Automatic LSMR damping calculator 
@@ -51,5 +64,3 @@ Note that PyVoroTomo >= 2.0.0 requires PyKonal 0.5
 
 - numpy 2.0 infinity bug
 - few other saftey catches, glitch fixes, and speedups I have found useful for PyVoroTomo
-
-

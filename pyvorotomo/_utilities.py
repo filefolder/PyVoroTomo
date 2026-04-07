@@ -5,6 +5,7 @@ import mpi4py.MPI as MPI
 import os
 import signal
 import time
+import traceback
 import numpy as np
 import pykonal
 import pandas as pd
@@ -34,9 +35,7 @@ def abort():
 
 
 def signal_handler(sig, frame):
-    """
-    A utility function to handle interrupting signals.
-    """
+    """A utility function to handle interrupting signals"""
     try:
         shutdown_logging()
     except:
@@ -45,10 +44,7 @@ def signal_handler(sig, frame):
 
 
 def configure_logger(name, log_file, verbose=False):
-    """
-    A utility function to configure logging. Return True on successful
-    execution.
-    """
+    """A utility function to configure logging. Return True with success."""
 
     # Define the date format for logging.
     datefmt        ="%Y%jT%H:%M:%S"
@@ -100,7 +96,8 @@ def log_errors(logger):
                 logger.error(
                     f"{func.__name__}() raised {type(exc)}: {exc}"
                 )
-                raise (exc)
+                logger.error(traceback.format_exc())
+                raise exc
 
         return _decorated_func
 
@@ -108,7 +105,7 @@ def log_errors(logger):
 
 
 def shutdown_logging():
-    """ Close all logging handlers """
+    """Close all logging handlers"""
     try:
         for logger_name in list(logging.Logger.manager.loggerDict.keys()) + ['']:
             logger = logging.getLogger(logger_name)
@@ -161,7 +158,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
 
 def parse_args():
-    """ Parse and return command line arguments """
+    """Parse and return command line arguments"""
 
     parser = ArgumentParser()
 
@@ -217,7 +214,7 @@ def parse_args():
 
 
 def parse_cfg(configuration_file):
-    """ Parse and return contents of the configuration file """
+    """Parse and return contents of the configuration file"""
 
     cfg = dict()
     parser = configparser.ConfigParser()
@@ -280,6 +277,14 @@ def parse_cfg(configuration_file):
         "algorithm",
         "max_dist",
         fallback=155
+    )
+    raypath_bottom_mask_string = parser.get(
+        "algorithm",
+        "raypath_bottom_mask",
+        fallback="-1,-1"
+    )
+    _cfg["raypath_bottom_mask"] = (
+        [float(x.strip()) for x in raypath_bottom_mask_string.split(",")]
     )
     _cfg["cutoff_depth"] = parser.getfloat(
         "algorithm",
@@ -804,6 +809,7 @@ def compute_residual_weights(residuals, method="huber", scale=None, tuning_param
         scale = max(mad * 1.4826, 1e-6)
 
     abs_u = np.abs(residuals / scale)
+    abs_u = np.maximum(abs_u, 1e-9)
 
     if method == "huber":
         k = tuning_param if tuning_param > 0 else 1.5
@@ -813,8 +819,8 @@ def compute_residual_weights(residuals, method="huber", scale=None, tuning_param
         percentile = tuning_param if tuning_param > 0 else 80
         threshold = np.percentile(abs_u, percentile)
         upper = np.percentile(abs_u, 95)  # treat the worst 5% equally bad
-        threshold = max(threshold, 1e-6)
-        weights = np.where(abs_u <= threshold, 1.0, 1 - (abs_u - threshold) / (upper - threshold))
+        denom = max(upper - threshold, 1e-9)
+        weights = np.where(abs_u <= threshold, 1.0, 1 - (abs_u - threshold) / denom)
         weights = np.clip(weights, 0, 1)
 
     else:
@@ -825,14 +831,11 @@ def compute_residual_weights(residuals, method="huber", scale=None, tuning_param
 
 def blend_weights(weights, blend_factor):
     """
-    Blend weights from 0 to 1
+    Returns blended weights from 0 to 1
 
     Args:
         weights: weights from compute_residual_weights
         blend_factor: 0 = uniform weights, 1 = full weighting
-
-    Returns:
-        Blended weights
     """
     blend_factor = np.clip(blend_factor, 0.0, 1.0)
     return (1 - blend_factor) + blend_factor * weights
@@ -960,4 +963,3 @@ def kde_stack(stack, bw_method='scott', return_uncertainty=False):
         return delta_slowness, uncertainty
 
     return delta_slowness
-

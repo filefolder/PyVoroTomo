@@ -220,257 +220,110 @@ def parse_cfg(configuration_file):
     parser = configparser.ConfigParser()
     parser.read(configuration_file)
 
+    # ALGORITHM section
     _cfg = dict()
-
-    _cfg["adaptive_data_weight"] = parser.getfloat(
-        "algorithm",
-        "adaptive_data_weight",
-        fallback=0.6
-    )
-    _cfg["density_to_gradient_weight"] = parser.getfloat(
-        "algorithm",
-        "density_to_gradient_weight",
-        fallback=0.5
-    )
-    _cfg["niter"] = parser.getint(
-        "algorithm",
-        "niter",
-        fallback=4
-    )
-    _cfg["kvoronoi"] = parser.getfloat(
-        "algorithm",
-        "kvoronoi",
-        fallback=15
-    )
-    _cfg["nvoronoi"] = parser.getint(
-        "algorithm",
-        "nvoronoi",
-        fallback=400
-    )
-    _cfg["min_rays_per_cell"] = parser.getint(
-        "algorithm",
-        "min_rays_per_cell",
-        fallback=3
-    )
-    _cfg["paretos_alpha"] = parser.getfloat(
-        "algorithm",
-        "paretos_alpha",
-        fallback=2
-    )
-    _cfg["phase_order"] = [str(v).upper() for v in parser.get(
-        "algorithm",
-        "phase_order",
-        fallback='P,S'
-        ).split(",")
-    ]
-    _cfg["hvr"] = parser.getfloat(
-        "algorithm",
-        "hvr",
-        fallback=3
-    )
-    _cfg["min_dist"] = parser.getfloat(
-        "algorithm",
-        "min_dist",
-        fallback=1
-    )
-    _cfg["max_dist"] = parser.getfloat(
-        "algorithm",
-        "max_dist",
-        fallback=155
-    )
-    raypath_bottom_mask_string = parser.get(
-        "algorithm",
-        "raypath_bottom_mask",
-        fallback="-1,-1"
-    )
-    _cfg["raypath_bottom_mask"] = (
-        [float(x.strip()) for x in raypath_bottom_mask_string.split(",")]
-    )
-    _cfg["cutoff_depth"] = parser.getfloat(
-        "algorithm",
-        "cutoff_depth",
-        fallback=50
-    )
-    _cfg["nreal"] = parser.getint(
-        "algorithm",
-        "nreal"
-    )
-    _cfg["k_medians_percent"] = parser.getfloat(
-        "algorithm",
-        "k_medians_percent",
-        fallback=15
-    )
-    _cfg["min_narrival"] = parser.getint(
-        "algorithm",
-        "min_narrival",
-        fallback=9
-    )
-    _cfg["narrival"] = parser.getint(
-        "algorithm",
-        "narrival"
-    )
-    _cfg["nevent"] = parser.getint(
-        "algorithm",
-        "nevent"
-    )
-    _cfg["narrival_percent"] = parser.getfloat(
-        "algorithm",
-        "narrival_percent",
-        fallback=-1
-    )
-    _cfg["nevent_percent"] = parser.getfloat(
-        "algorithm",
-        "nevent_percent",
-        fallback=-1
-    )
-    _cfg["outlier_removal_factor"] = parser.getfloat(
-        "algorithm",
-        "outlier_removal_factor",
-        fallback=1.5
-    )
-    _cfg["max_arrival_residual"] = parser.getfloat(
-        "algorithm",
-        "max_arrival_residual",
-        fallback=0.9
-    )
-    _cfg["max_event_residual"] = parser.getfloat(
-        "algorithm",
-        "max_event_residual",
-        fallback=1.3
-    )
-    _cfg["solver_weight_start"] = parser.getfloat(
-        "algorithm",
-        "solver_weight_start",
-        fallback=0.0
-    )
-    _cfg["solver_weight_end"] = parser.getfloat(
-        "algorithm",
-        "solver_weight_end",
-        fallback=0.8
-    )
-    _cfg["solver_weight_method"] = parser.get(
-        "algorithm",
-        "solver_weight_method",
-        fallback='huber'
-    ).lower()
-    _cfg["solver_weight_tuning"] = parser.getfloat(
-        "algorithm",
-        "solver_weight_tuning",
-        fallback=-1
-    )
-    _cfg["stack_type"] = parser.get(
-        "algorithm",
-        "stack_type",
-        fallback='mean'
-    )
-    _cfg["stack_trim_percent"] = parser.getfloat(
-        "algorithm",
-        "stack_trim_percent",
-        fallback=20.0
-    )    
-    _cfg["max_dlat"] = parser.getfloat(
-        "algorithm",
-        "max_dlat",
-        fallback=0.2
-    )
-    _cfg["max_dlon"] = parser.getfloat(
-        "algorithm",
-        "max_dlon",
-        fallback=0.2
-    )
-    _cfg["max_ddepth"] = parser.getfloat(
-        "algorithm",
-        "max_ddepth",
-        fallback=50
-    )
-    _cfg["max_dtime"] = parser.getfloat(
-        "algorithm",
-        "max_dtime",
-        fallback=1
-    )
-    _cfg["max_lat"] = parser.getfloat(
-        "algorithm",
-        "max_lat",
-        fallback=91
-    )
-    _cfg["max_lon"] = parser.getfloat(
-        "algorithm",
-        "max_lon",
-        fallback=361
-    )
-    _cfg["min_lat"] = parser.getfloat(
-        "algorithm",
-        "min_lat",
-        fallback=-91
-    )
-    _cfg["min_lon"] = parser.getfloat(
-        "algorithm",
-        "min_lon",
-        fallback=-361
-    )
-    _cfg["min_depth"] = parser.getfloat(
-        "algorithm",
-        "min_depth",
-        fallback=-999
-    )
-    _cfg["max_depth"] = parser.getfloat(
-        "algorithm",
-        "max_depth",
-        fallback=9999
-    )
-    _cfg["damp"] = parser.getfloat(
-        "algorithm",
-        "damp"
-    )
-    _cfg["atol"] = parser.getfloat(
-        "algorithm",
-        "atol"
-    )
-    _cfg["btol"] = parser.getfloat(
-        "algorithm",
-        "btol"
-    )
-    _cfg["conlim"] = parser.getint(
-        "algorithm",
-        "conlim"
-    )
-    _cfg["maxiter"] = parser.getint(
-        "algorithm",
-        "maxiter",
-        fallback=7
-    )
+    _cfg["niter"] = parser.getint("algorithm", "niter", fallback=4)
+    _cfg["phase_order"] = [str(v).upper() for v in parser.get("algorithm", "phase_order", fallback='P,S').split(",")]
+    _cfg["min_dist"] = parser.getfloat("algorithm", "min_dist", fallback=1)
+    _cfg["max_dist"] = parser.getfloat("algorithm", "max_dist", fallback=155)
+    raypath_bottom_mask_string = parser.get("algorithm", "raypath_bottom_mask", fallback="-1,-1")
+    _cfg["raypath_bottom_mask"] = [float(x.strip()) for x in raypath_bottom_mask_string.split(",")]
+    _cfg["nreal"] = parser.getint("algorithm", "nreal")
+    _cfg["min_narrival"] = parser.getint("algorithm", "min_narrival", fallback=9)
+    _cfg["narrival"] = parser.getint("algorithm", "narrival")
+    _cfg["nevent"] = parser.getint("algorithm", "nevent")
+    _cfg["narrival_percent"] = parser.getfloat("algorithm", "narrival_percent", fallback=-1)
+    _cfg["nevent_percent"] = parser.getfloat("algorithm", "nevent_percent", fallback=-1)
+    _cfg["outlier_removal_factor"] = parser.getfloat("algorithm", "outlier_removal_factor", fallback=1.5)
+    _cfg["max_arrival_residual"] = parser.getfloat("algorithm", "max_arrival_residual", fallback=3.0)
+    _cfg["max_event_residual"] = parser.getfloat("algorithm", "max_event_residual", fallback=2.0)
+    _cfg["solver_weight_start"] = parser.getfloat("algorithm", "solver_weight_start", fallback=0.0)
+    _cfg["solver_weight_end"] = parser.getfloat("algorithm", "solver_weight_end", fallback=0.8)
+    _cfg["solver_weight_method"] = parser.get("algorithm", "solver_weight_method", fallback='huber').lower()
+    _cfg["solver_weight_tuning"] = parser.getfloat("algorithm", "solver_weight_tuning", fallback=-1)
+    _cfg["stack_type"] = parser.get("algorithm", "stack_type", fallback='mean')
+    _cfg["stack_trim_percent"] = parser.getfloat("algorithm", "stack_trim_percent", fallback=20.0)
+    _cfg["max_dlat"] = parser.getfloat("algorithm", "max_dlat", fallback=0.2)
+    _cfg["max_dlon"] = parser.getfloat("algorithm", "max_dlon", fallback=0.2)
+    _cfg["max_ddepth"] = parser.getfloat("algorithm", "max_ddepth", fallback=50)
+    _cfg["max_dtime"] = parser.getfloat("algorithm", "max_dtime", fallback=1)
+    _cfg["max_lat"] = parser.getfloat("algorithm", "max_lat", fallback=91)
+    _cfg["max_lon"] = parser.getfloat("algorithm", "max_lon", fallback=361)
+    _cfg["min_lat"] = parser.getfloat("algorithm", "min_lat", fallback=-91)
+    _cfg["min_lon"] = parser.getfloat("algorithm", "min_lon", fallback=-361)
+    _cfg["min_depth"] = parser.getfloat("algorithm", "min_depth", fallback=-999)
+    _cfg["max_depth"] = parser.getfloat("algorithm", "max_depth", fallback=9999)
+    _cfg["damp"] = parser.getfloat("algorithm", "damp",fallback=-1)
+    _cfg["sigma_station"] = parser.getfloat("algorithm", "sigma_station",fallback=0.001)
+    _cfg["atol"] = parser.getfloat("algorithm", "atol",fallback=1e-5)
+    _cfg["btol"] = parser.getfloat("algorithm", "btol",fallback=0.01)
+    _cfg["conlim"] = parser.getfloat("algorithm", "conlim",fallback=1000)
+    _cfg["maxiter"] = parser.getint("algorithm", "maxiter", fallback=7)
+    _cfg["tt_crop_km"] = parser.getfloat("algorithm", "tt_crop_km", fallback=-1)
+    # Adaptive early stopping of realizations: after each realization
+    # (once >= stack_convergence_min_nreal are done, checked every
+    # stack_convergence_check_every), the running stacked model (same
+    # trim/mean/median statistic as update_model) is compared to the
+    # previous check; if the relative RMS change stays below
+    # stack_convergence_tol for stack_convergence_patience consecutive
+    # checks, remaining realizations are skipped. 0 disables (default).
+    # A tolerance of ~0.02 (2% change per check block) is a sane start.
+    _cfg["stack_convergence_tol"] = parser.getfloat(
+        "algorithm", "stack_convergence_tol", fallback=0)
+    _cfg["stack_convergence_min_nreal"] = parser.getint(
+        "algorithm", "stack_convergence_min_nreal", fallback=30)
+    _cfg["stack_convergence_check_every"] = parser.getint(
+        "algorithm", "stack_convergence_check_every", fallback=5)
+    _cfg["stack_convergence_patience"] = parser.getint(
+        "algorithm", "stack_convergence_patience", fallback=3)
+    # mask nodes beyond the radius with NaN inside the cropped box.
+    # Default False for PyVoroTomo: ray tracing descends the traveltime
+    # gradient and must never encounter NaN nodes near the crop edge.
+    _cfg["tt_crop_mask"] = parser.getboolean("algorithm", "tt_crop_mask", fallback=False)
     cfg["algorithm"] = _cfg
 
-
+    # MESHING section
     _cfg = dict()
+    _cfg["adaptive_data_weight"] = parser.getfloat("meshing", "adaptive_data_weight", fallback=0.6)
+    _cfg["density_to_gradient_weight"] = parser.getfloat("meshing", "density_to_gradient_weight", fallback=0.5)
+    _cfg["hvr"] = parser.getfloat("meshing", "hvr", fallback=3)
+    _cfg["target_rays_per_cell"] = parser.getint("meshing", "target_rays_per_cell", fallback=25)
+    _cfg["min_cell_width_km"] = parser.getfloat("meshing", "min_cell_width_km", fallback=20)
+    _cfg["max_cell_width_km"] = parser.getfloat("meshing", "max_cell_width_km", fallback=150)
+    _cfg["enable_backfill"] = parser.getboolean("meshing", "enable_backfill", fallback=True)
+    _cfg["min_rays_per_cell"] = parser.getint("meshing", "min_rays_per_cell", fallback=10)
+    cfg["meshing"] = _cfg
 
-    output_label = parser.get(
-        "model",
-        "output_label",
-        fallback='output'
-    )
-    output_label=output_label+f"_{stamp}"
+    # ANALYZE section
+    _cfg = dict()
+    _cfg["pick_start_iter"] = parser.getint("analyze", "pick_start_iter", fallback=3)
+    _cfg["pick_min_iters_present"] = parser.getint("analyze", "pick_min_iters_present", fallback=3)
+    _cfg["pick_drop"] = parser.getboolean("analyze", "pick_drop", fallback=False)
+    _cfg["pick_median_threshold"] = parser.getfloat("analyze", "pick_median_threshold", fallback=0.5)
+    _cfg["pick_mad_max"] = parser.getfloat("analyze", "pick_mad_max", fallback=0.5)
+    _cfg["pick_station_excess"] = parser.getfloat("analyze", "pick_station_excess", fallback=2.5)
+    _cfg["pick_scale_k"] = parser.getfloat("analyze", "pick_scale_k", fallback=3.5)
+    _cfg["pick_max_drop_fraction"] = parser.getfloat("analyze", "pick_max_drop_fraction", fallback=0.10)
+    _cfg["event_residual_threshold"] = parser.getfloat("analyze", "event_residual_threshold", fallback=0.6)
+    _cfg["event_weight_threshold"] = parser.getfloat("analyze", "event_weight_threshold", fallback=0.6)
+    _cfg["event_std_threshold"] = parser.getfloat("analyze", "event_std_threshold", fallback=0.5)
+    _cfg["station_residual_threshold"] = parser.getfloat("analyze", "station_residual_threshold", fallback=0.5)
+    _cfg["station_std_threshold"] = parser.getfloat("analyze", "station_std_threshold", fallback=0.5)
+    cfg["analyze"] = _cfg
 
-    output_dir = parser.get(
-        "model",
-        "output_dir",
-        fallback=output_label
-    )
+    # MODEL section
+    _cfg = dict()
+    output_label = parser.get("model", "output_label", fallback='output')
+    output_label = output_label + f"_{stamp}"
+
+    output_dir = parser.get("model", "output_dir", fallback=output_label)
     output_dir = os.path.abspath(output_dir)
     _cfg["output_dir"] = output_dir
 
-    log_file = parser.get(
-        "model",
-        "log_file",
-        fallback='pyvorotomo.log'
-    )
-    _cfg["log_file"] = os.path.join(output_dir,log_file)
+    log_file = parser.get("model", "log_file", fallback='pyvorotomo.log')
+    _cfg["log_file"] = os.path.join(output_dir, log_file)
 
-    scratch_dir = parser.get(
-        "model",
-        "scratch_dir",
-        fallback=os.path.join(output_dir,"scratch")
-    )
+    scratch_dir = parser.get("model", "scratch_dir", fallback=os.path.join(output_dir, "scratch"))
     scratch_dir = os.path.abspath(scratch_dir)
     _cfg["scratch_dir"] = scratch_dir
 
@@ -478,137 +331,63 @@ def parse_cfg(configuration_file):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(scratch_dir, exist_ok=True)
 
-    stations_path = parser.get(
-        "model",
-        "stations_path"
-    )
+    stations_path = parser.get("model", "stations_path")
     stations_path = os.path.abspath(stations_path)
     _cfg["stations_path"] = stations_path
 
-    events_path = parser.get(
-        "model",
-        "events_path"
-    )
+    events_path = parser.get("model", "events_path")
     events_path = os.path.abspath(events_path)
-    _cfg["events_path"] = events_path    
+    _cfg["events_path"] = events_path
 
-    initial_pwave_path = parser.get(
-        "model",
-        "initial_pwave_path"
-    )
+    initial_pwave_path = parser.get("model", "initial_pwave_path")
     initial_pwave_path = os.path.abspath(initial_pwave_path)
     _cfg["initial_pwave_path"] = initial_pwave_path
 
-    initial_swave_path = parser.get(
-        "model",
-        "initial_swave_path"
-    )
+    initial_swave_path = parser.get("model", "initial_swave_path")
     initial_swave_path = os.path.abspath(initial_swave_path)
     _cfg["initial_swave_path"] = initial_swave_path
+ 
+    map_filter_string = parser.get("model", "map_filter", fallback='')
+    _cfg["map_filter"] = [float(x.strip()) for x in map_filter_string.split(",")] if map_filter_string else '' # note HAS to be an empty string, not None
+ 
 
-    map_filter_string = parser.get(
-        "model",
-        "map_filter",
-        fallback=''
-    )
-    _cfg["map_filter"] = [float(x.strip()) for x in map_filter_string.split(",")] if map_filter_string else ''
+    truepicks_path = parser.get("model", "truepicks_path", fallback='')
+    _cfg["truepicks_path"] = os.path.abspath(truepicks_path) if truepicks_path.strip() else ''
+    _cfg["always_include_truepicks"] = parser.getboolean("algorithm", "always_include_truepicks", fallback=True)
 
-    _cfg["output_1d_model"] = parser.getboolean(
-        "model",
-        "output_1d_model",
-        fallback=True
-    )
-    _cfg["perform_res_test"] = parser.getboolean(
-        "model",
-        "perform_res_test",
-        fallback=False
-    )
-    res_test_string = parser.get(
-        "model",
-        "res_test_size_mag",
-        fallback='100,0.08'
-    )
+    _cfg["output_1d_model"] = parser.getboolean("model", "output_1d_model", fallback=True)
+    _cfg["perform_res_test"] = parser.getboolean("model", "perform_res_test", fallback=False)
+    res_test_string = parser.get("model", "res_test_size_mag", fallback='100,0.08')
     _cfg["res_test_size_mag"] = [float(x.strip()) for x in res_test_string.split(",")]
-
-    res_test_layers_string = parser.get(
-        "model",
-        "res_test_layers",
-        fallback="10,25,50,70,120,170,230"
-    )
-    _cfg["res_test_layers"] = (
-        [float(x.strip()) for x in res_test_layers_string.split(",")]
-    )
-    rerun_restest = parser.get(
-        "model",
-        "rerun_restest",
-        fallback=''
-    )
+ 
+    res_test_layers_string = parser.get("model", "res_test_layers", fallback="10,25,50,70,120,170,230")
+    _cfg["res_test_layers"] = [float(x.strip()) for x in res_test_layers_string.split(",")]
+    rerun_restest = parser.get("model", "rerun_restest", fallback='')
     if rerun_restest.strip():
         _cfg["rerun_restest"] = os.path.abspath(rerun_restest)
     else:
         _cfg["rerun_restest"] = ''
-
     cfg["model"] = _cfg
-
-
+ 
+    # RELOCATION section
     _cfg = dict()
-    _cfg["method"] = parser.get(
-        "relocate",
-        "method",
-        fallback='DE'
-    ).upper()
-
-    if _cfg["method"] == "LINEAR":
-        _cfg["atol"] = parser.getfloat(
-            "linearized_relocation",
-            "atol"
-        )
-        _cfg["btol"] = parser.getfloat(
-            "linearized_relocation",
-            "btol"
-        )
-        _cfg["maxiter"] = parser.getint(
-            "linearized_relocation",
-            "maxiter"
-        )
-        _cfg["conlim"] = parser.getint(
-            "linearized_relocation",
-            "conlim"
-        )
-        _cfg["damp"] = parser.getfloat(
-            "linearized_relocation",
-            "damp"
-        )
-    elif _cfg["method"] == "DE":
-        _cfg["depth_min"] = parser.getfloat(
-            "de_relocation",
-            "depth_min"
-        )
-        _cfg["dlat"] = parser.getfloat(
-            "de_relocation",
-            "dlat"
-        )
-        _cfg["dlon"] = parser.getfloat(
-            "de_relocation",
-            "dlon"
-        )
-        _cfg["ddepth"] = parser.getfloat(
-            "de_relocation",
-            "ddepth"
-        )
-        _cfg["dtime"] = parser.getfloat(
-            "de_relocation",
-            "dtime"
-        )
-    else:
-        raise (
-            ValueError(
-                "Relocation method must be either \"linear\" or \"DE\"."
-            )
-        )
-    cfg["relocate"] = _cfg
-
+    _cfg["depth_min"] = parser.getfloat("relocation", "depth_min", fallback=-99)
+    _cfg["dlat"] = parser.getfloat("relocation", "dlat", fallback=0.3)
+    _cfg["dlon"] = parser.getfloat("relocation", "dlon", fallback=0.3)
+    _cfg["ddepth"] = parser.getfloat("relocation", "ddepth", fallback=50)
+    _cfg["dtime"] = parser.getfloat("relocation", "dtime", fallback=3)
+    _cfg["pick_uncert"] = parser.getfloat("relocation", "pick_uncert", fallback=0.02)
+    _cfg["tt_error"] = parser.getfloat("relocation", "tt_error", fallback=0.015)
+    # "edt" = NLL-style Equal Differential Time objective (robust to outlier
+    # picks, origin time decoupled); "l1" = legacy weighted-L1 joint search.
+    _cfg["method"] = parser.get("relocation", "method", fallback="edt").lower()
+    # pick error assigned to arrivals manually flagged in truepicks_path (seconds);
+    # near-zero => these picks dominate the relocation likelihood
+    _cfg["truepick_error"] = parser.getfloat("relocation", "truepick_error", fallback=0.001) # not in cfg / TODO
+    cfg["relocation"] = _cfg
+ 
     return cfg
+
 
 
 def write_cfg(argc, cfg):
@@ -696,7 +475,18 @@ def remove_outliers(dataframe, tukey_k, column, max_resid=None):
     Return DataFrame with outliers removed using Tukey fences.
     ALSO remove any arrival or event beyond maxresid (first)
     Note that "column" is always "residual" in our case
+
+    Rows flagged truepick=True are NEVER removed: they are protected from
+    both the max_resid cut and the Tukey fences (fences are still computed
+    from the full distribution). Rescued rows are logged.
     """
+
+    protected = None
+    if "truepick" in dataframe.columns:
+        is_true = dataframe["truepick"].fillna(False).astype(bool)
+        if is_true.any():
+            protected = dataframe[is_true]
+            dataframe = dataframe[~is_true]
 
     # Toss max residuals for both arrivals and events
     if max_resid:
@@ -713,6 +503,18 @@ def remove_outliers(dataframe, tukey_k, column, max_resid=None):
         dataframe = dataframe[
              (dataframe[column] >= vmin)
             &(dataframe[column] <= vmax)]
+
+    if protected is not None:
+        would_cut = 0
+        if max_resid:
+            would_cut = int((protected[column].abs() > max_resid).sum())
+        if would_cut > 0:
+            logger = get_logger(f"__main__.{__name__}")
+            logger.info(
+                f"remove_outliers: protected {len(protected)} truepicks "
+                f"({would_cut} would otherwise have been culled)   ###"
+            )
+        dataframe = pd.concat([dataframe, protected])
 
     return dataframe
 
@@ -742,6 +544,27 @@ def station_dict(dataframe):
     }
 
     return _station_dict
+
+
+def pick_error_dict(dataframe, event_id, default_error, truepick_error):
+    """
+    Return {(network, station, phase): pick_error_seconds} for one event,
+    for EQLocator.add_pick_errors(). Arrivals flagged truepick=True get
+    truepick_error (near-zero => they dominate the EDT likelihood);
+    everything else gets default_error.
+    """
+
+    dataframe = dataframe.set_index("event_id")
+    if "truepick" not in dataframe.columns:
+        dataframe = dataframe.assign(truepick=False)
+    fields = ["network", "station", "phase", "truepick"]
+    dataframe = dataframe.loc[[event_id], fields]
+
+    return {
+        (network, station, phase):
+            truepick_error if bool(is_true) else default_error
+        for network, station, phase, is_true in dataframe.values
+    }
 
 
 def arrival_dict(dataframe, event_id):
@@ -789,53 +612,57 @@ def compute_residual_weights(residuals, method="huber", scale=None, tuning_param
     Compute solver weights based on arrival residuals to down-weight outliers.
 
     Args:
-        residuals: Array of traveltime residuals
+        residuals: Array of traveltime residuals.
         method: Weighting method:
-            - "huber": Down-weighting beyond threshold, w = k/|u| for |u| > k
-            - "linear": Full weight up to threshold percentile, then linear decay to 0
-        scale: Scale estimate for residuals. If None, uses MAD.
-        tuning_param: Method-specific parameter:
-            - huber: Threshold for down-weighting onset (default: 1.5)
-            - linear: Threshold percentile for down-weighting onset (default: 80%)
+            - "huber"    : convex, never zero; w = 1 for |u|<=k, w = k/|u| beyond.
+                           Best for fat-tailed but not catastrophic data.
+                           For a +2s bad pick, weighs to 0.27 (SOFT)
+            - "cauchy"   : convex, never zero; w = 1/(1 + (u/k)^2).
+                           Smooth alternative to Huber, stronger tail attenuation.
+                           For a +2s bad pick, weights to 0.18 (MEDIUM)
+            - "bisquare" : redescending; w = (1 - (u/k)^2)^2 for |u|<=k, w = 0 beyond.
+                           Best for data with gross outliers (e.g. bad picks).
+                           For a +2s bad pick, weighs to 0.02 (HARD)
+
+        scale: Robust scale estimate. If None, uses MAD x 1.4826.
+        tuning_param: Method-specific. If <= 0, uses standard defaults:
+            huber 1.345, bisquare 4.685, cauchy 2.385, soft_l1 1.0,
+            linear 80 (percentile).
 
     Returns:
-        weights: Array of weights in [0, 1], where 1 = full weight
+        weights: Array of weights in [0, 1], where 1 = full weight.
     """
     residuals = np.asarray(residuals)
-
-    # Robust scale estimate using MAD
     if scale is None:
         mad = np.median(np.abs(residuals - np.median(residuals)))
         scale = max(mad * 1.4826, 1e-6)
-
     abs_u = np.abs(residuals / scale)
     abs_u = np.maximum(abs_u, 1e-9)
 
+    defaults = {"huber": 1.345, "bisquare": 4.685, "cauchy": 2.385}
+    k = tuning_param if tuning_param > 0 else defaults[method]
+
     if method == "huber":
-        k = tuning_param if tuning_param > 0 else 1.5
         weights = np.where(abs_u <= k, 1.0, k / abs_u)
-
-    elif method == "linear":
-        percentile = tuning_param if tuning_param > 0 else 80
-        threshold = np.percentile(abs_u, percentile)
-        upper = np.percentile(abs_u, 95)  # treat the worst 5% equally bad
-        denom = max(upper - threshold, 1e-9)
-        weights = np.where(abs_u <= threshold, 1.0, 1 - (abs_u - threshold) / denom)
-        weights = np.clip(weights, 0, 1)
-
+    elif method == "cauchy":
+        weights = 1.0 / (1.0 + (abs_u / k)**2)
+    elif method == "bisquare":
+        # Tukey's bisquare (biweight): redescending, hits zero at |u| = k
+        u_over_k = abs_u / k
+        weights = np.where(abs_u <= k, (1.0 - u_over_k**2)**2, 0.0)
     else:
-        raise ValueError(f"Unknown method: {method}. Use: huber or linear")
+        raise ValueError(f"Unknown method: {method}. Use: huber, cauchy, or bisquare")
 
     return weights
 
 
 def blend_weights(weights, blend_factor):
     """
-    Returns blended weights from 0 to 1
-
     Args:
         weights: weights from compute_residual_weights
         blend_factor: 0 = uniform weights, 1 = full weighting
+
+    Returns blended weights from 0 to 1
     """
     blend_factor = np.clip(blend_factor, 0.0, 1.0)
     return (1 - blend_factor) + blend_factor * weights
@@ -891,7 +718,85 @@ def estimate_noise_from_residuals(residuals, method='mad'):
         return (q3 - q1) / 1.349  # convert std equivalent
 
 
-# not in use but fun idea
+import warnings
+def stack_modal(stack, trim=0.25, sep=1.5, minor_frac=0.25, min_valid=3):
+    """Gated-bimodal trimmed-mean stack over a masked (NUM, nz, ny, nx) array.
+    Per cell: a symmetric trimmed mean of the valid realizations by default;
+    the trimmed mean of the dominant mode only where the cell is clearly bimodal.
+    NaN/masked-safe; cells with < min_valid valid samples are masked.
+    Returns a masked array (parity with the np.ma.mean/median branches)."""
+    raw = np.ma.filled(np.ma.asarray(stack).astype(float), np.nan)
+    NUM, nz = raw.shape[0], raw.shape[1]
+    out = np.full(raw.shape[1:], np.nan)
+    if NUM == 0:
+        return np.ma.masked_invalid(out)
+
+    def take(arr, idx):                         # gather (L,ny,nx) at per-cell idx (ny,nx)
+        return np.take_along_axis(arr, idx[None], axis=0)[0]
+
+    def range_tmean(a, b, P):                   # trimmed mean of sorted positions [a, b)
+        nd = b - a
+        kd = np.floor(nd * trim).astype(np.intp)
+        kd = np.where((kd > 0) & (nd > 2 * kd), kd, 0)
+        return (take(P, b - kd) - take(P, a + kd)) / np.maximum(nd - 2 * kd, 1)
+
+    with warnings.catch_warnings(), np.errstate(all="ignore"):
+        warnings.simplefilter("ignore")
+        for iz in range(nz):
+            sl = raw[:, iz]                                  # (NUM, ny, nx)
+            finite = np.isfinite(sl)
+            m = finite.sum(axis=0).astype(np.intp)           # valid count per cell
+
+            s = np.sort(np.where(finite, sl, np.inf), axis=0)        # valid first, +inf last
+            vmask = np.arange(NUM)[:, None, None] < m[None]
+            sv = np.where(vmask, s, 0.0)
+
+            zero = np.zeros((1,) + sl.shape[1:])
+            P  = np.concatenate([zero, np.cumsum(sv,      axis=0)], axis=0)   # P[i]=sum first i
+            P2 = np.concatenate([zero, np.cumsum(sv * sv, axis=0)], axis=0)
+            total, total2 = P[NUM], P2[NUM]
+
+            # default: trimmed mean over all valid values
+            default = range_tmean(np.zeros_like(m), m, P)
+
+            # best two-class split (Otsu) over valid positions
+            t   = np.arange(1, NUM)[:, None, None]
+            Pt  = P[1:NUM]                                    # = P[t]
+            n0, n1 = t.astype(float), (m[None] - t).astype(float)
+            between = n0 * n1 * (Pt / n0 - (total[None] - Pt) / n1) ** 2
+            between[~(t <= (m[None] - 1))] = -np.inf          # only splits with both sides valid
+            split = np.clip(np.argmax(between, axis=0).astype(np.intp) + 1,
+                            1, np.maximum(m - 1, 1))
+
+            # gate stats for lo = [0, split), hi = [split, m)
+            n_lo, n_hi = split.astype(float), (m - split).astype(float)
+            Ps, P2s = take(P, split), take(P2, split)
+            mu_lo = Ps / np.maximum(n_lo, 1)
+            mu_hi = (total - Ps) / np.maximum(n_hi, 1)
+            spread = (np.sqrt(np.maximum(P2s / np.maximum(n_lo, 1) - mu_lo ** 2, 0)) +
+                      np.sqrt(np.maximum((total2 - P2s) / np.maximum(n_hi, 1) - mu_hi ** 2, 0)))
+            minor = np.minimum(n_lo, n_hi) / np.maximum(m, 1)
+            bimodal = ((m >= 8) & (minor >= minor_frac) &
+                       (spread > 0) & ((mu_hi - mu_lo) >= sep * spread))
+
+            # dominant-cluster trimmed mean
+            lo_big = n_lo >= n_hi
+            a = np.where(lo_big, 0, split).astype(np.intp)
+            b = np.where(lo_big, split, m).astype(np.intp)
+
+            dom = range_tmean(a, b, P)
+
+            cell = np.where(bimodal, dom, default)
+            cell[m < min_valid] = np.nan
+            cell[~np.isfinite(cell)] = np.nan
+            out[iz] = cell
+
+    return np.ma.masked_invalid(out)
+
+
+
+# not in use and poorly implemented but fun idea
+# it seems that nothing really beats a good trimmed mean
 from scipy.stats import gaussian_kde
 def kde_stack(stack, bw_method='scott', return_uncertainty=False):
     """
@@ -899,7 +804,7 @@ def kde_stack(stack, bw_method='scott', return_uncertainty=False):
 
     Parameters:
     -----------
-    stack : h5py Dataset or numpy array, shape (150, nz, ny, nx)
+    stack : h5py Dataset or numpy array, shape (NUM, nz, ny, nx)
     bw_method : bandwidth selection ('scott', 'silverman', or float)
     return_uncertainty : if True, also return std or IQR as uncertainty measure
 
@@ -941,7 +846,7 @@ def kde_stack(stack, bw_method='scott', return_uncertainty=False):
                     kde = gaussian_kde(valid_values, bw_method=bw_method)
 
                     v_min, v_max = valid_values.min(), valid_values.max()
-                    v_range = np.linspace(v_min, v_max, 60) # cap at 60... maybe even lower is good
+                    v_range = np.linspace(v_min, v_max, n_realizations)
                     density = kde(v_range)
 
                     delta_slowness_flat[cell_idx] = v_range[np.argmax(density)]

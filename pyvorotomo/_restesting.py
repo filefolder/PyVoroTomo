@@ -211,16 +211,16 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
 
     metrics = {
         'phase': phase,
-        'correlation': float(correlation),
-        'amplitude_ratio': float(amplitude_ratio),
-        'polarity_recovery': float(polarity_recovery),
-        'well_resolved_fraction': float(well_resolved_fraction),
-        'rms_input': float(rms_input),
-        'rms_recovered': float(rms_recovered),
+        'correlation': np.around(float(correlation),5),
+        'amplitude_ratio': np.around(float(amplitude_ratio),5),
+        'polarity_recovery': np.around(float(polarity_recovery),5),
+        'well_resolved_fraction': np.around(float(well_resolved_fraction),5),
+        'rms_input': np.around(float(rms_input),8),
+        'rms_recovered': np.around(float(rms_recovered),8),
         'total_nodes': int(len(input_pert.flatten())),
         'coverage_nodes': int(n_coverage),
         'analysis_nodes': int(n_analysis),
-        'coverage_fraction': float(coverage_fraction)
+        'coverage_fraction': np.around(float(coverage_fraction),5)
     }
 
     logger.info(f"Checkerboard resolution results for {phase}:   ###")
@@ -238,7 +238,7 @@ def _analyze_resolution(iterator, input_model, recovered_model, phase, ref_model
 def _create_voronoi_coverage_mask(iterator, model, phase):
     """Create mask for areas covered by well-sampled Voronoi cells"""
 
-    min_rays = iterator.cfg["algorithm"]["min_rays_per_cell"]
+    min_rays = iterator.cfg["meshing"]["min_rays_per_cell"]
 
     if iterator.sensitivity_matrix is None:
         logger.warning("No sensitivity matrix available for Voronoi masking")

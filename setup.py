@@ -1,6 +1,3 @@
-"""
-setup.py adapted from https://github.com/kennethreitz/setup.py
-"""
 import io
 import numpy as np
 import os
@@ -12,15 +9,15 @@ name            = "pyvorotomo"
 description     = "Version 2 of a Parsimonious Voronoi-cell based tomography code (originally by Fang et al., 2019)"
 url             = "https://github.com/filefolder/PyVoroTomo"
 email           = "robert.pickle@anu.edu.au"
-author          = "Hongjian Fang and Malcolm C. A. White and Robert Pickle"
+author          = "Robert Pickle and Hongjian Fang and Malcolm C. A. White"
 requires_python = ">=3.10"
 packages        = ["pyvorotomo"]
 required        = [
     "KDEpy>=1.1.12",
-    "mpi4py>=4.1.0",
+    "mpi4py>=4.1.2",
     "numpy>=2.4.0",
     "pandas",
-    "pykonal>=0.5.0",
+    "pykonal>=0.5.4",
     "tables",
     "scipy>=1.16.0"
 ]
@@ -49,7 +46,7 @@ setup(
     install_requires=required,
     license=license,
     classifiers=[
-        'Development Status :: 3 - Alpha',
+        'Development Status :: 4 - Beta',
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
         "Operating System :: MacOS :: MacOS X",

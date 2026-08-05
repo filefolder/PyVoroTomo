@@ -15,7 +15,6 @@ from scipy.stats import iqr
 from scipy.spatial import cKDTree
 
 from . import _dataio
-from . import _clustering
 from . import _constants
 from . import _picklabel
 from . import _utilities
@@ -40,8 +39,7 @@ ROOT_RANK  = _constants.ROOT_RANK
 
 class InversionIterator(object):
     """
-    A class providing core functionality PyVoroTomo
-      i.e. the inversion process
+    A class providing core functionality PyVoroTomo i.e. the inversion process
     """
 
     def __init__(self, argc):
@@ -427,6 +425,175 @@ class InversionIterator(object):
 
         return np.clip(blend, 0.0, 1.0)
 
+    @_utilities.log_errors(logger)
+    def _diagnose_damping_regime(self, weighted_sensitivity, weighted_residuals,
+                                 x, damp_vector, nstation, nvoronoi,
+                                 atol, btol, conlim, maxiter):
+        """
+        Tell the user whether damping is too high, too low, or about right.
+
+        Strategy: re-solve the SAME augmented system at a near-zero damping
+        level to estimate the misfit FLOOR -- the part of the residual that no
+        amount of model freedom can remove (coherent noise + parameterization /
+        ray-theory error). Compare the current misfit against that floor:
+
+          - current misfit >> floor  -> damping is suppressing fittable signal
+                                        (TOO HIGH)
+          - current misfit ~= floor  -> damping isn't measurably hurting the fit;
+                                        you're at/below the point where it matters
+                                        (could go LOWER, no benefit to)
+          - in between               -> regularizing without hurting the fit (OK)
+
+        Also reports whether the problem is FLOOR-LIMITED: if even zero damping
+        explains little of the data, the limit is the floor (data quality /
+        parameterization), NOT damping -- so tuning damping is the wrong lever.
+
+        Costs one extra LSMR solve. Call sparingly (e.g. realization 0 only).
+        Returns a dict of the raw numbers; logging is done by the caller on root.
+        """
+        ncol = weighted_sensitivity.shape[1]
+
+        # Near-zero-damping solve: scale the chosen per-cell vector down by 1e-3
+        # so the SHAPE (and the sub-min_rays pins) are preserved but the level is
+        # negligible. This isolates the floor without changing the parameterization.
+        tiny = np.asarray(damp_vector, dtype=float) * 1e-3
+        D0 = scipy.sparse.diags(np.concatenate([tiny, np.zeros(nstation)]), format='csr')
+        aG = scipy.sparse.vstack([weighted_sensitivity, D0], format='csr')
+        ad = np.concatenate([weighted_residuals, np.zeros(ncol)])
+        x0 = scipy.sparse.linalg.lsmr(
+            aG, ad, damp=0, atol=atol, btol=btol,
+            conlim=conlim, maxiter=maxiter, show=False)[0]
+
+        d_norm       = np.linalg.norm(weighted_residuals)
+        misfit_now   = np.linalg.norm(weighted_sensitivity @ x  - weighted_residuals)
+        misfit_floor = np.linalg.norm(weighted_sensitivity @ x0 - weighted_residuals)
+
+        # fraction of current misfit that exists BECAUSE of damping (vs the floor)
+        damp_excess = (misfit_now - misfit_floor) / (misfit_floor + 1e-30)
+        var_red       = 1.0 - (misfit_now   / (d_norm + 1e-30)) ** 2
+        var_red_floor = 1.0 - (misfit_floor / (d_norm + 1e-30)) ** 2
+
+        return dict(d_norm=d_norm, misfit_now=misfit_now, misfit_floor=misfit_floor,
+                    damp_excess=damp_excess, var_red=var_red, var_red_floor=var_red_floor)
+
+
+    def _ascii_lcurve(self, xx, yy, corner_idx=None, width=100, height=30):
+        """
+        Render an ASCII L-curve to a list of strings suitable for logger.info.
+        xx, yy are 1-D arrays (already log-transformed).
+        corner_idx is the index of the detected corner, marked with '*'.
+        """
+        if len(xx) == 0:
+            return ["(no points)"]
+        # Normalize to plot grid
+        x_min, x_max = xx.min(), xx.max()
+        y_min, y_max = yy.min(), yy.max()
+        x_range = max(x_max - x_min, 1e-12)
+        y_range = max(y_max - y_min, 1e-12)
+        grid = [[" "] * width for _ in range(height)]
+        # Place each point. y axis is inverted (row 0 = top).
+        for i, (x, y) in enumerate(zip(xx, yy)):
+            col = int(round((x - x_min) / x_range * (width - 1)))
+            row = int(round((1 - (y - y_min) / y_range) * (height - 1)))
+            col = max(0, min(width - 1, col))
+            row = max(0, min(height - 1, row))
+            marker = "X" if i == corner_idx else "."
+            grid[row][col] = marker
+        # Frame + axis labels
+        lines = []
+        lines.append(f"  log||m|| = {y_max:.2f}")
+        lines.append("    +" + "-" * width + "+")
+        for row in grid:
+            lines.append("    |" + "".join(row) + "|")
+        lines.append("    +" + "-" * width + "+")
+        lines.append(f"  log||m|| = {y_min:.2f}    "
+                     f"log||r||: {x_min:.2f} .. {x_max:.2f}")
+        return lines
+
+
+    @_utilities.log_errors(logger)
+    def _lcurve_corner_level(self, weighted_sensitivity, weighted_residuals,
+                             base_damp, shape, nvoronoi, nstation,
+                             atol, btol, conlim, maxiter, levels=None):
+        """
+        Choose the damping LEVEL from the L-curve sweep.
+
+        Take the KNEE -- the onset of the misfit rise, i.e. the
+        smallest level at which damping first costs more than `tol` of misfit
+        over the floor. If misfit never rises (well-determined / floor-limited),
+        fall back to the lowest level. `strength` is kept only as a diagnostic;
+        it no longer drives the choice, because on plateau+gentle-rise curves the
+        max-distance "corner" drifts into the over-damped arm.
+
+        Returns (level, strength, has_corner, misfits, norms, levels).
+        """
+        if levels is None:
+            levels = np.geomspace(1e-6, 1.0, 100)
+
+        sigma_station  = self.cfg["algorithm"].get("sigma_station")
+        lambda_station = 1.0 / (sigma_station + 1e-9)
+
+        norms   = np.empty(len(levels))
+        misfits = np.empty(len(levels))
+        for i, lev in enumerate(levels):
+            d  = lev * base_damp * shape
+            vd = scipy.sparse.diags(d, format='csr')
+            sd = scipy.sparse.diags(np.full(nstation, lambda_station), format='csr')
+            fd = scipy.sparse.block_diag([vd, sd])
+            aG = scipy.sparse.vstack([weighted_sensitivity, fd])
+            ad = np.concatenate([weighted_residuals, np.zeros(nvoronoi + nstation)])
+            xs = scipy.sparse.linalg.lsmr(aG, ad, damp=0, atol=atol, btol=btol,
+                                          conlim=conlim, maxiter=maxiter, show=False)[0]
+            norms[i]   = np.linalg.norm(xs[:nvoronoi])
+            misfits[i] = np.linalg.norm(weighted_sensitivity @ xs - weighted_residuals)
+
+        xx = np.log(misfits + 1e-30)
+        yy = np.log(norms   + 1e-30)
+
+        # --- corner-likeness GATE (not a locator): max perpendicular distance
+        #     from the endpoint chord, normalized by the box diagonal. ~0.005 for
+        #     a smooth ramp; >~0.2 only for a genuine localized elbow. ---
+        x0, y0, x1, y1 = xx[0], yy[0], xx[-1], yy[-1]
+        chord = np.hypot(x1 - x0, y1 - y0) + 1e-30
+        diag  = np.hypot(np.ptp(xx), np.ptp(yy)) + 1e-30
+        dist  = np.abs((y1 - y0) * xx - (x1 - x0) * yy + x1 * y0 - y1 * x0) / chord
+        strength   = float(dist.max() / diag)
+        corner_idx = int(np.argmax(dist))
+
+        # --- onset-of-rise knee: stable, light damping (the usual outcome) ---
+        mmin = misfits.min()
+        tol  = self.cfg["algorithm"].get("lcurve_misfit_tol", 0.003) # probably don't need to add this param but TODO
+        over = np.where(misfits > mmin * (1.0 + tol))[0]
+        knee_idx = int(over[0]) if over.size else 0
+
+        # --- decision ---
+        x_span     = float(np.ptp(xx))
+        corner_thr = self.cfg["algorithm"].get("lcurve_corner_strength", 0.15)
+        if x_span < 0.02:
+            used_idx, regime, has_corner = 0, "floor-limited (misfit flat)", False
+        elif strength >= corner_thr:
+            used_idx, regime, has_corner = corner_idx, \
+                f"REAL corner (strength {strength:.3f})", True
+        else:
+            used_idx, regime, has_corner = knee_idx, \
+                f"no corner (strength {strength:.3f} < {corner_thr}) -> onset knee", False
+        level = float(levels[used_idx])
+
+        if RANK == ROOT_RANK:
+            logger.info(f"  L-curve: {regime}; level={level:.4g} (idx {used_idx}); "
+                        f"knee idx {knee_idx}, max-dist idx {corner_idx}, "
+                        f"strength {strength:.4f}")
+            # print the ascii chart (fun!)
+            for line in self._ascii_lcurve(xx, yy, corner_idx=used_idx):
+                logger.info(line)
+            # print all the chart values (change from debug to info to see ALL values)
+            for i, lev in enumerate(levels):
+                is_used = i == used_idx
+                marker = " X" if is_used else "  "
+                log = logger.info if is_used else logger.debug
+                log(f"  {marker} lev={lev:.4g}  ||r||={misfits[i]:.4e} ||m||={norms[i]:.4e}")            
+        return level, strength, has_corner, misfits, norms, levels
+
 
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
@@ -457,7 +624,7 @@ class InversionIterator(object):
         ray_counts = np.bincount(sensitivity_coo.col, minlength=nvoronoi)
         valid_cells = (ray_counts >= min_rays)
 
-        # NEW: Apply residual-based weighting
+        # Apply residual-based weighting
         solver_weight_method = self.cfg["algorithm"].get("solver_weight_method", "huber")
         solver_weight_tuning = self.cfg["algorithm"].get("solver_weight_tuning", -1)
         solver_weight_blend_factor = self._get_weight_blend()
@@ -493,40 +660,112 @@ class InversionIterator(object):
             self.residual_weights = np.ones(len(self.residuals))
 
 
-        # Perform automatic damping if damp < 0
+        # Perform automatic damping if damp < 0 (probably should be the default/only option)
         damp = self.cfg["algorithm"]["damp"]
-        if damp < 0:
 
+        if damp <= -10: # coarse bulk damping 
+            # Use scipy's auto-damping heuristic + iteration scaling.
+            # ||G||_F is a reliable scale for the matrix; small fraction of that is
+            # the canonical Tikhonov damping anchor.
+            G_scale = scipy.sparse.linalg.norm(weighted_sensitivity, ord='fro')
+
+            # Anchor: ||G||_F over the sqrt(min dim) is a defensible default.
+            base_damp = G_scale / np.sqrt(min(weighted_sensitivity.shape))
+
+            # Scale by current data misfit relative to initial -- want MORE damping
+            # as the model converges (smaller updates per iteration).
+            # 1st iteration is only 90%, but grows from there
+            #if self.iiter > 0: # e.g. normal run
+            #    iter_mult = 1.0 + 0.05 * (self.iiter-2)
+            #else:
+            #    iter_mult = 1.0 # res tests have iter == 0
+            iter_mult = 1.0
+
+            damp = base_damp * iter_mult
+
+            if RANK == ROOT_RANK:
+                logger.info(f"  auto damp: G_scale={G_scale:.2f} | base damp: {base_damp:.4f} * iter_mult: {iter_mult:.2f} --> effective damp: {damp:.4f}")
+
+            result = scipy.sparse.linalg.lsmr(
+                weighted_sensitivity, weighted_residuals, 
+                damp=damp, atol=atol, btol=btol, conlim=conlim, maxiter=maxiter, show=False
+            )
+            x, istop, itn, normr, normar, norma, conda, normx = result
+
+        elif damp < 0: # per-cell damping & L-curve corner calculation for the first 10 realizations
             df = pd.DataFrame({'col': sensitivity_coo.col, 'data': np.abs(sensitivity_coo.data)})
-            sensitivity_per_cell = df.groupby('col')['data'].median().reindex(range(nvoronoi), fill_value=0).values
-            norm_sensitivity = sensitivity_per_cell / np.max(sensitivity_per_cell)
-            norm_ray_count = ray_counts / np.max(ray_counts)
-            cell_quality = norm_sensitivity/2 + norm_ray_count/2 # should be from 0 to 1
+            target_rays = self.cfg["meshing"].get("target_rays_per_cell", 25) # 0 below min_rays, ramping to 1 by some "fully resolved" threshold
+            norm_ray_count = np.clip(ray_counts / target_rays, 0, 1) # 0 below min_rays/cell, gradient to target_rays per cell
+            cell_quality = norm_ray_count # should be from 0 to 1
 
             if RANK == ROOT_RANK:
                 used_mask = ray_counts > 0
                 used_quality = cell_quality[used_mask]
-                percentiles = np.percentile(used_quality, [0, 25, 50, 75, 90])
+                percentiles = np.percentile(used_quality, [10, 25, 50, 75, 90])
                 logger.info(f" Cell quality distribution  "
-                            f"0%: {percentiles[0]:.2f}, 25%: {percentiles[1]:.2f}, "
+                            f"10%: {percentiles[0]:.2f}, 25%: {percentiles[1]:.2f}, "
                             f"50%: {percentiles[2]:.2f}, 75%: {percentiles[3]:.2f}, 90%: {percentiles[4]:.2f}")
 
-            # if we're past the first realization, we can just set damp to the previous estimation
-            if self._prev_conda is not None:
-                damp = np.full(nvoronoi, self._prev_conda)
-            else:
-                base_damp = np.std(weighted_residuals) / np.median(np.abs(weighted_sensitivity.data)) * 0.5 # the extra 1/2 seems to fit better
-                # good = 50% reduction, bad = 100% increase
-                damp = base_damp * (0.5 + 1.5 * (1 - cell_quality))
+            G_scale = scipy.sparse.linalg.norm(weighted_sensitivity, ord='fro')
+            base_damp = G_scale / np.sqrt(min(weighted_sensitivity.shape))
+            shape = 0.5 + 1.5 * (1 - cell_quality)        # per-cell multiplier?
+            #shape = np.ones(nvoronoi) # just set the same? safe option
 
-            # Infer dimensions from sensitivity matrix
+            # Self-appoint the overall LEVEL by L-curve corner. For the first
+            # N_SEARCH realizations of each iteration we run the full corner
+            # search; for the rest we reuse the median corner found so far.
+            # base_damp and the per-cell shape are always rebuilt fresh; only the
+            # dimensionless LEVEL multiplier is shared across realizations.
             total_cols = weighted_sensitivity.shape[1]
             nstation = total_cols - nvoronoi
+            N_SEARCH = 9
+
+            # Reset the accumulator at the start of each iteration (epoch)
+            epoch_key = (self.iiter,phase)
+            if getattr(self, "_level_epoch", None) != epoch_key:
+                self._level_epoch = epoch_key
+                self._level_samples = []
+
+            if self.ireal < N_SEARCH or not self._level_samples:
+                level, strength, has_corner, misfits, norms, levels = \
+                    self._lcurve_corner_level(
+                        weighted_sensitivity, weighted_residuals,
+                        base_damp, shape, nvoronoi, nstation,
+                        atol, btol, conlim, maxiter)
+                self._level_samples.append(level)
+                searched = True
+            else:
+                level = float(np.median(self._level_samples))
+                searched = False
+                has_corner = None
+                strength = None
+
+            damp = level * base_damp * shape
+
+            if RANK == ROOT_RANK:
+                if searched:
+                    corner_txt = (f"L-curve CORNER (strength {strength:.3f})"
+                                  if has_corner else
+                                  f"no corner (strength {strength:.3f}<thr) -> guessing knee")
+                    logger.info(f"  self-appointed level {level:.5f} x base_damp {base_damp:.3f} "
+                                f"[{corner_txt}; epoch median {np.median(self._level_samples):.3f} "
+                                f"over {len(self._level_samples)}]")
+                else:
+                    logger.info(f"  damping: reused epoch-median level {level:.5f} x base_damp {base_damp:.3f} "
+                                f"(median over {len(self._level_samples)} searched realizations)")
 
             # Create damping matrix for Voronoi cells only
             voronoi_damping = scipy.sparse.diags(damp, format='csr')
-            # No damping for station parameters
-            station_damping = scipy.sparse.diags(np.zeros(nstation), format='csr')
+
+            # Optionally add station terms in the solver
+            sigma_station = self.cfg["algorithm"].get("sigma_station") # default is -1
+            if sigma_station < 0: # station terms are free
+                station_damping = scipy.sparse.diags(np.zeros(nstation), format='csr')
+            else:
+                # applying some constraints. small numbers = trust that stations correct
+                lambda_station = 1.0 / (sigma_station + 1e-9)    # in slowness to be in the same units cells
+                station_damping = scipy.sparse.diags(np.full(nstation, lambda_station), format='csr')
+
             # Combine into full damping matrix matching sensitivity matrix columns
             full_damping = scipy.sparse.block_diag([voronoi_damping, station_damping])
 
@@ -535,13 +774,56 @@ class InversionIterator(object):
             augmented_d = np.concatenate([weighted_residuals, np.zeros(nvoronoi + nstation)])
 
             result = scipy.sparse.linalg.lsmr(
-                augmented_G, augmented_d, 
+                augmented_G, augmented_d,
                 damp=0, atol=atol, btol=btol, conlim=conlim, maxiter=maxiter, show=False
             )
             x, istop, itn, normr, normar, norma, conda, normx = result
 
-            # set the conda for next time (also add up to 20% more)
-            self._prev_conda = np.std(weighted_residuals)/conda * np.random.uniform(1.0, 1.2)
+            station_terms = x[nvoronoi:]
+            logger.info(f"  station term magnitudes: mean|x|={np.mean(np.abs(station_terms)):.3f}, "
+                        f"max|x|={np.max(np.abs(station_terms)):.3f}, "
+                        f"||stations||={np.linalg.norm(station_terms):.3f}")
+
+            # Capture the per-cell damping vector BEFORE collapsing it to a scalar,
+            # so the diagnostic (and the 1D path) can use it.
+            damp_vector = np.atleast_1d(np.asarray(damp, dtype=float)).copy()
+
+            # Damping-regime diagnostic: re-solve at ~zero damping to estimate the
+            # misfit floor, and report whether damping is too high, too low, or OK.
+            # One extra solve; run on realization 0 only. Needs the full per-cell
+            # vector, so it must come before the np.mean() collapse below.
+            if self.ireal == 0 and len(damp_vector) == nvoronoi:
+                reg = self._diagnose_damping_regime(
+                    weighted_sensitivity, weighted_residuals, x, damp_vector,
+                    nstation, nvoronoi, atol, btol, conlim, maxiter)
+                if RANK == ROOT_RANK:
+                    if reg["damp_excess"] > 0.25:
+                        verdict = "TOO HIGH -- damping adds >10% misfit over the floor"
+                    elif reg["damp_excess"] < 0.01:
+                        verdict = "LOW side -- in the flat zone; damping barely affects fit"
+                    else:
+                        verdict = "OK -- regularizing without measurably hurting the fit"
+                    logger.info(f"  damping regime: {verdict}")
+                    logger.info(
+                        f"    var.reduction {reg['var_red']:.1%} (floor {reg['var_red_floor']:.1%}) | "
+                        f"misfit {reg['misfit_now']:.1f} vs floor {reg['misfit_floor']:.1f} | "
+                        f"excess {reg['damp_excess']:.1%}")
+                    if reg["var_red_floor"] < 0.5:
+                        logger.warning(
+                            f"    NOTE: even at ~zero damping only {reg['var_red_floor']:.0%} "
+                            f"variance reduction -- FLOOR-limited (data/parameterization), "
+                            f"not damping-limited; tuning damp won't help   ###")
+
+            # Per-cell damping distribution over valid cells (uses the vector
+            # captured above, before the scalar collapse below).
+            #if RANK == ROOT_RANK and len(damp_vector) == nvoronoi and np.any(valid_cells):
+            #    p = np.percentile(damp_vector[valid_cells], [10, 25, 50, 75, 90])
+            #    logger.info(
+            #        f"  per-cell damp (valid only)  10%:{p[0]:.3f} 25%:{p[1]:.3f} "
+            #        f"50%:{p[2]:.3f} 75%:{p[3]:.3f} 90%:{p[4]:.3f}  | "
+            #        f"{int(valid_cells.sum())}/{nvoronoi} valid")
+
+            # Collapse to a representative scalar for the 1D path and logging.
             damp = np.mean(damp)
 
         else:
@@ -560,7 +842,7 @@ class InversionIterator(object):
         logger.info(f"  ||m||         = {normx:8.3f}  (solution norm)")
         logger.info(f"  ||G^-1||||G|| = {conda:8.2f}  (condition estimate)")
         logger.info(f"  med(std) G,r  = {np.median(self.sensitivity_matrix.data):.3f}({np.std(self.sensitivity_matrix.data):.3f}), {np.median(self.residuals.data):.3f}({np.std(self.residuals.data):.3f})")
-        logger.info(f"  est/used damp = {np.std(weighted_residuals)/conda:.4e} / {damp:.4e}")
+        logger.info(f"  used or median damp   = {damp:.3f}")
         logger.info(f"  used/nvoronoi = {np.sum(ray_counts >= min_rays):.0f}/{nvoronoi:.0f}  ({itn} LSMR iterations)")
 
         delta_slowness = self.projection_matrix * x[:nvoronoi]
@@ -572,6 +854,7 @@ class InversionIterator(object):
         local_quality_coverage = self.projection_matrix * ray_coverage
         local_quality_coverage = local_quality_coverage.reshape(model.npts)
 
+        """
         # Increases with decreasing residual norm
         quality_normr = 1.0 / (normr + 1e-8)
         # Increases with decreasing condition number
@@ -583,6 +866,7 @@ class InversionIterator(object):
         global_quality = (quality_normr * 0.4 +
                           quality_conda * 0.4 +
                           quality_coverage * 0.2)
+        """
 
         # Add to our solution stack
         if phase == "P":
@@ -595,6 +879,9 @@ class InversionIterator(object):
         # Also calculate a 1D model?
         if compute_1d:
             nz = model.npts[0]
+
+            # Note that using the same 3D damp. Can either do a full recalc (TODO) or fudge assume fine
+            damp_1d = damp
 
             # Lazy init of the 1D realization stack
             stack_attr = f"_{phase.lower()}wave_1d_stack"
@@ -630,7 +917,7 @@ class InversionIterator(object):
             # Solve — use scalar damp (mean of per-cell damp if auto, else as-is)
             result_1d = scipy.sparse.linalg.lsmr(
                 weighted_sensitivity_1d, weighted_residuals,
-                damp=damp, atol=atol, btol=btol, conlim=conlim,
+                damp=damp_1d, atol=atol, btol=btol, conlim=conlim,
                 maxiter=maxiter, show=False
             )
             x_1d, istop_1d, itn_1d, normr_1d, normar_1d, norma_1d, conda_1d, normx_1d = result_1d
@@ -639,7 +926,7 @@ class InversionIterator(object):
             logger.info(f"  1D ||Gm-d||      = {normr_1d:8.2f}  (residual norm)")
             logger.info(f"  1D ||m||         = {normx_1d:8.3f}  (solution norm)")
             logger.info(f"  1D ||G^-1||||G|| = {conda_1d:8.2f}  (condition estimate)")
-            logger.info(f"  1D est/used damp = {np.std(weighted_residuals)/conda_1d:.4e} / {damp:.4e}")
+            logger.info(f"  1D est/used damp = {np.std(weighted_residuals)/conda_1d:.4e} / {damp_1d:.4e}")
             logger.info(f"  1D # iterations  = {itn_1d}")
 
             stack_1d = getattr(self, stack_attr)
@@ -927,249 +1214,440 @@ class InversionIterator(object):
 
 
     @_utilities.log_errors(logger)
-    def _generate_voronoi_cells(self, phase, kvoronoi, nvoronoi,
-        alpha=2, adaptive_weight=0.5, density_to_gradient_weight=0.5):
+    def _generate_voronoi_cells(self, phase):
         """
-        Generate Voronoi cells using k-medians clustering of raypaths with optional
-        adaptive data-driven adjustment.
+        Generate Voronoi cells via top-down density-aware refinement.
+     
+        Algorithm:
+            1. Generate a coarse uniform-random initial mesh, sized so that
+               average cell width ~= max_cell_width_km. Initial seeds are
+               placed with bias toward high-density / high-gradient regions
+               via the existing density_to_gradient_weight blend.
+            2. Iteratively refine: for each cell, count rays captured within
+               a sphere of radius (nearest-neighbor-distance / 2). If too many,
+               split the cell into 4 children placed within the parent's
+               neighborhood. Repeat until no cell needs splitting.
+            3. Refinement stops on cells that hit min_cell_width_km — their
+               ray counts are accepted regardless.
+            4. Sparse-region cells naturally never get split, so they remain
+               at the initial coarse size — no extra work in those regions.
 
-        Args:
-            phase: The seismic phase to consider
-            kvoronoi: Number of cells to generate using k-medians clustering
-            nvoronoi: Total number of Voronoi cells to generate
-            alpha: Parameter controlling surface bias (0 for uniform, higher for more surface bias)
-            adaptive_weight: Degree of adaptive meshing. Anything > 0 changes mode
-            density_to_gradient_weight: ratio of weighting for raypath density:velocity gradient adaptive meshing
+        This is much faster than bottom-up greedy placement on large datasets:
+        work scales with final cell count (~thousands), not with point count
+        (~millions).
+
+        Reads (cfg["algorithm"]):
+            target_rays_per_cell        target unique rays per cell
+            density_to_gradient_weight  data:gradient blend (default 0.5)
+            cell_size_jitter            +/- jitter on per-realization target (default 0.2)
+            ray_subsample_fraction      fraction of rays kept per realization (default 0.8)
+            min_cell_width_km           refinement floor (km). 0 = no floor.
+            max_cell_width_km           initial mesh scale (km). 0 = uses bbox/10.
+            enable_backfill             keep backfill in empty regions (default True)
+            max_refine_passes           safety cap on refinement iterations (default 20)
+            hvr                         horizontal/vertical ratio (default 1.0).
+                                        >1 produces horizontally-elongated, vertically-thin
+                                        cells. min/max_cell_width_km describe horizontal
+                                        extent; vertical extent ~= width/hvr.
+                                        Matches the transform used in _projected_ray_idxs.
+
         """
         if RANK == ROOT_RANK:
-
-            logger.debug(
-                f"Generating {nvoronoi} Voronoi cells ({kvoronoi} k-medians, "
-                f"{nvoronoi-kvoronoi} random) with alpha={alpha}, adaptive_weight={adaptive_weight}"
+     
+            cfg               = self.cfg["meshing"]
+            target_rpc        = cfg["target_rays_per_cell"]
+            dg_weight         = cfg["density_to_gradient_weight"]
+            size_jitter       = 0.2 # hardwired at 20%
+            ray_subsample     = 0.8 # hardwired, re-select only 80% of rays (todo parameterize?)
+            min_cell_width_km = cfg["min_cell_width_km"]
+            max_cell_width_km = cfg["max_cell_width_km"]
+            enable_backfill   = cfg["enable_backfill"]
+            max_passes        = 20 # hardwired at 20 / more than enough
+            hvr               = cfg["hvr"]
+     
+            dg_weight     = float(np.clip(dg_weight, 0.0, 1.0))
+            ray_subsample = float(np.clip(ray_subsample, 0.25, 1.0))
+     
+            target_rpc_real = max(
+                5,
+                int(target_rpc * np.random.uniform(1.0 - size_jitter,
+                                                   1.0 + size_jitter))
             )
-
-            # Get model parameters
+     
             if phase == "P":
                 model = self.pwave_model
             elif phase == "S":
                 model = self.swave_model
             else:
                 raise ValueError(f"Unrecognized phase ({phase})")
-
+     
             min_coords = model.min_coords
             max_coords = model.max_coords
-            delta = max_coords - min_coords
+            delta      = max_coords - min_coords
 
-            # Initialize cells array
-            base_cells = None
+            # ----------------------------------------------------------------------
+            # Anisotropic coordinate transform (follows _projected_ray_idxs)
+            # ----------------------------------------------------------------------
+            # hvr > 1 compresses theta/phi (horizontal) axes during distance
+            # computations. After the transform, vertical separations look larger
+            # relative to horizontal ones, so:
+            #   - The kd-tree "nearest neighbor" prefers vertical alignment
+            #   - Refinement splits more aggressively in the vertical direction
+            #   - Final cells become horizontally elongated, vertically thin
+            # The user-facing min/max_cell_width_km parameters are interpreted in
+            # transformed-space km, which corresponds to *horizontal* km in the
+            # raw model (vertical cell extents will be ~width/hvr).
 
-            # Generate k-medians cells FIRST (if requested)
-            if kvoronoi > 0:
-                points = self._sample_raypaths(phase)
-                # Unlikely but kvoronoi needs to be less then the len(points)! we could cap it at 90% or something
-
-                if len(points) == 0:
-                    logger.warning("No raypath points available for k-medians clustering")
+            center = (min_coords + max_coords) / 2.0
+            scale = np.array([1.0/hvr, 1.0, 1.0]) # this is inverted relative to projected_ray_idxs.. we are only increasing vertical (rho) density
+     
+            def _to_xyz(coords_sph):
+                """Apply hvr scaling, then convert spherical → cartesian (km)."""
+                if hvr != 1:
+                    transformed = center + (coords_sph - center) / scale
+                    return sph2xyz(transformed)
                 else:
-                    # Apply sampling size control
-                    k_medians_percent = self.cfg["algorithm"].get("k_medians_percent", 15)
-                    max_points = int(len(self.sampled_arrivals) * k_medians_percent / 100)
+                    return sph2xyz(coords_sph)
+     
+            def _from_xyz(coords_xyz):
+                """Inverse: cartesian → spherical, then undo hvr scaling."""
+                if hvr != 1:
+                    transformed = xyz2sph(coords_xyz)
+                    return center + (transformed - center) * scale
+                else:
+                    return xyz2sph(coords_xyz)
 
-                    # Add some (20%?) variability to avoid identical clustering
-                    if max_points > 4:
-                        points_variance = np.random.randint(-max_points//5, max_points//5)
-                    else:
-                        points_variance = 0
-                    max_points = max(10, max_points + points_variance)
+            # 1. Get raypath cloud + ray IDs
+            points, ray_ids = self._sample_raypaths(phase)
+            if len(points) == 0:
+                logger.warning("No raypath points — falling back to random cells")
+                self.voronoi_cells = np.random.rand(100, 3) * delta + min_coords
+                self.synchronize(attrs=["voronoi_cells"])
+                return True
 
-                    if len(points) > max_points:
-                        idxs = np.random.choice(len(points), max_points, replace=False)
-                        points = points[idxs]
+            in_bounds = np.all((points >= min_coords) & (points <= max_coords), axis=1)
+            points  = points[in_bounds]
+            ray_ids = ray_ids[in_bounds]
 
-                    # Ensure points are within model bounds before clustering
-                    valid_mask = (
-                        (points[:, 0] >= min_coords[0]) & (points[:, 0] <= max_coords[0]) &
-                        (points[:, 1] >= min_coords[1]) & (points[:, 1] <= max_coords[1]) &
-                        (points[:, 2] >= min_coords[2]) & (points[:, 2] <= max_coords[2])
+            if ray_subsample < 1.0:
+                unique_rays = np.unique(ray_ids)
+                n_keep = max(10, int(len(unique_rays) * ray_subsample)) # stay above 10 at least..
+                keep_rays = np.random.choice(unique_rays, n_keep, replace=False)
+                keep_mask = np.isin(ray_ids, keep_rays)
+                points  = points[keep_mask]
+                ray_ids = ray_ids[keep_mask]
+
+            n_points = len(points)
+            n_unique_rays = len(np.unique(ray_ids))
+            if n_unique_rays == 0:
+                logger.warning("No rays after subsampling — falling back")
+                self.voronoi_cells = np.random.rand(100, 3) * delta + min_coords
+                self.synchronize(attrs=["voronoi_cells"])
+                return True
+
+            points_xyz = _to_xyz(points)
+            point_tree = cKDTree(points_xyz)
+            bbox_diag = np.linalg.norm(points_xyz.max(axis=0) - points_xyz.min(axis=0))
+
+            # 2. Density field for biasing initial mesh
+            density_interp = None
+            try:
+                data_density_3d, _ = self._estimate_data_density(phase, 1.0)
+                grad_density_3d    = self.gradient_magnitude
+                if data_density_3d is not None and grad_density_3d is not None:
+                    eff_density = (dg_weight * data_density_3d
+                                   + (1.0 - dg_weight) * grad_density_3d)
+                    floor = max(eff_density.max() * 0.01, 1e-6)
+                    eff_density = np.maximum(eff_density, floor)
+                    density_interp = scipy.interpolate.RegularGridInterpolator(
+                        self.grid_coords, eff_density,
+                        bounds_error=False, fill_value=floor
                     )
-                    points = points[valid_mask]
+            except Exception as e:
+                logger.warning(f"Density field unavailable: {e}")
 
-                    if len(points) >= 3 and kvoronoi >= 3:  # bare minimum
+            # 3. Initial coarse mesh
+            # Sizing: use max_cell_width_km as the initial cell scale. The
+            # refinement loop with Voronoi assignment will subdivide where data
+            # density warrants. Starting coarse is correct — sparse regions stay
+            # coarse, dense regions split down.
+            if max_cell_width_km > 0:
+                target_init_width = max_cell_width_km
+            else:
+                target_init_width = bbox_diag / 10.0
 
-                        # Run k-medians clustering in model coordinates
-                        model_bounds = (min_coords, max_coords)
-                        medians, kvoronoi = _clustering.k_medians(kvoronoi, points, model_bounds) # update kvoronoi here (e.g. if truncated)
+            #bbox_volume = np.prod(points_xyz.max(axis=0) - points_xyz.min(axis=0))
+            #cell_volume = (4.0 / 3.0) * np.pi * (target_init_width / 2.0) ** 3
+            #n_initial = int(bbox_volume / max(cell_volume, 1e-9))
 
-                        # Verify medians are within bounds
-                        medians = np.clip(medians, min_coords, max_coords)
-                        base_cells = medians
+            # This approximates a better estimate given model dimensions?
+            corners = _to_xyz(np.array([min_coords, max_coords]))
+            model_volume = np.prod(np.abs(corners[1] - corners[0]))
+            n_initial = int(model_volume / target_init_width ** 3)
 
-                        logger.debug("K-medians used %d raypath points" % len(points))
-                        logger.info(
-                            f" Depth ranges: Raypath {6371-points[:,0].min():.1f} to {6371-points[:,0].max():.1f} km, "
-                            f"K-medians {6371-medians[:,0].min():.1f} to {6371-medians[:,0].max():.1f} km"
-                        ) # note that depth ranges won't print if kvoronoi < 3 (TODO?)
-                    else:
-                        logger.warning(f"Insufficient valid raypath points ({len(points)}) for k-medians clusters")
+            n_initial = int(n_initial * np.random.uniform(0.8, 1.2)) # a touch of chaos
+            n_initial = max(16, n_initial) # 16 is bottom of the barrel. Code should come up with something sensible...
+            if n_initial > 20000:
+                logger.warning("limiting the initial number of cells to 20000 (!!!)")
+            n_initial = min(n_initial, 20000)
 
-            # Generate random/adaptive cells for the remainder
-            n_random = nvoronoi - kvoronoi
-            
-            if n_random > 0:
+            # Sample initial seed positions in spherical coords. If density_interp
+            # exists, use rejection sampling biased by it; else uniform.
+            seeds_sph = self._sample_initial_seeds(
+                n_initial, min_coords, max_coords, delta,
+                density_interp, oversample=4
+            )
+            n_initial = len(seeds_sph)
 
-                if alpha == 0:
-                    # Uniform depth distribution
-                    rho = np.random.rand(n_random, 1) * delta[0] + min_coords[0]
+            # 4. Refinement loop: split cells with too many rays
+            n_splits_total = 0
+            for refine_pass in range(max_passes):
+                seeds_xyz = _to_xyz(seeds_sph)
+                seed_tree = cKDTree(seeds_xyz)
+
+                # NN distance per seed = approximate cell diameter
+                nn_dists, _ = seed_tree.query(seeds_xyz, k=2)
+                nn_dists = nn_dists[:, 1]
+
+                # Voronoi-style assignment: each raypath point's "owner" cell is
+                # its nearest seed. This is what the actual Voronoi tessellation
+                # downstream will do, so splitting decisions match real cell
+                # behavior. Avoids the capture-sphere overlap problem where the
+                # same ray gets counted in multiple sparse cells' spheres.
+                _, nearest_cell_per_point = seed_tree.query(points_xyz, k=1)
+
+                # Per-cell unique ray count
+                n_cells = len(seeds_xyz)
+                cell_ray_counts = np.zeros(n_cells, dtype=int)
+                # Group point indices by their owning cell
+                sort_idx = np.argsort(nearest_cell_per_point)
+                sorted_owners = nearest_cell_per_point[sort_idx]
+                sorted_rays   = ray_ids[sort_idx]
+                # Find segment boundaries (where owner changes)
+                change_points = np.concatenate([
+                    [0], np.where(np.diff(sorted_owners) != 0)[0] + 1, [len(sorted_owners)]
+                ])
+                for k in range(len(change_points) - 1):
+                    a, b = change_points[k], change_points[k + 1]
+                    if a == b:
+                        continue
+                    cell_id = sorted_owners[a]
+                    cell_ray_counts[cell_id] = len(np.unique(sorted_rays[a:b]))
+
+                # Decide which cells to split
+                cells_to_split = []
+                for i in range(n_cells):
+                    n_rays_here = cell_ray_counts[i]
+                    r_cell = nn_dists[i]
+                    # Split if over target AND splitting would not produce too-small cells.
+                    # Children will be roughly r_cell / 2 wide after a split into 4.
+                    if (n_rays_here > target_rpc_real and
+                        (min_cell_width_km == 0 or r_cell / 1.587 >= min_cell_width_km)): # n.b. 4^(1/3) = 1.587
+                        cells_to_split.append(i)
+
+                if not cells_to_split: # i.e. converged
+                    break
+
+                np.random.shuffle(cells_to_split) # a touch of chaos
+
+                # Perform splits: replace each parent with N=4 children placed
+                # randomly within the parent's neighborhood.
+                new_seeds_sph = []
+                keep_mask = np.ones(len(seeds_sph), dtype=bool)
+                for i in cells_to_split:
+                    keep_mask[i] = False
+                    parent_xyz = seeds_xyz[i]
+                    r_split = nn_dists[i] * 0.5
+                    n_children = np.random.choice([3,4,5])
+                    offsets = np.random.normal(scale=r_split / 2.0, size=(n_children, 3))
+                    children_xyz = parent_xyz + offsets
+                    children_sph = _from_xyz(children_xyz)
+                    children_sph = np.clip(children_sph, min_coords, max_coords)
+                    new_seeds_sph.append(children_sph)
+
+                n_splits_total += len(cells_to_split)
+                seeds_sph = np.vstack([seeds_sph[keep_mask]] + new_seeds_sph)
+
+            else:
+                logger.warning(f"  Refinement hit max_passes ({max_passes}) without "
+                               f"converging — mesh may have under-resolved cells")
+
+
+            # 5. Cull cells with zero assigned rays (Voronoi-style)
+            # Initial-mesh cells that landed in regions with no rays will own
+            # zero raypath points under nearest-seed assignment. Drop them.
+            n_pre_cull = len(seeds_sph)
+            seeds_xyz_now = _to_xyz(seeds_sph)
+            seed_tree_now = cKDTree(seeds_xyz_now)
+            _, owners = seed_tree_now.query(points_xyz, k=1)
+            owned_cells = np.unique(owners)
+            keep = np.zeros(len(seeds_sph), dtype=bool)
+            keep[owned_cells] = True
+            seeds_sph = seeds_sph[keep]
+            n_culled = n_pre_cull - len(seeds_sph)
+
+
+            # 6. Backfill model-volume gaps (optional, geometric)
+            """ OLD
+            n_data_cells = len(seeds_sph)
+            n_filler = 0
+            if enable_backfill and n_data_cells > 0:
+                seeds_xyz_arr = _to_xyz(seeds_sph)
+                seed_tree = cKDTree(seeds_xyz_arr)
+                if len(seeds_xyz_arr) >= 2:
+                    nn2, _ = seed_tree.query(seeds_xyz_arr, k=2)
+                    median_nn = np.median(nn2[:, 1])
                 else:
-                    # Higher cell density at surface
-                    beta_vals = np.random.beta(1, alpha, size=(n_random, 1))
-                    rho = max_coords[0] - beta_vals * delta[0]
+                    median_nn = bbox_diag * 0.1
+                backfill_spacing = median_nn * 1.5
 
-                # Generate random lateral coordinates
-                theta_phi = np.random.rand(n_random, 2) * delta[1:] + min_coords[1:]
-                random_cells = np.hstack([rho, theta_phi])
+                n_candidates = 12 ** 3 * 2
+                cands_sph = np.random.uniform(min_coords, max_coords,
+                                              size=(n_candidates, 3))
 
-                # Apply adaptive meshing ONLY to random cells
-                if adaptive_weight > 0:
-                    data_density_3d, data_edges = self._estimate_data_density(phase, adaptive_weight)
-                    #grad_density_3d, grad_coords = self._estimate_velocity_gradient_density(phase)
+                cands_xyz = _to_xyz(cands_sph)
+                d_to_nearest, _ = seed_tree.query(cands_xyz, k=1)
+                far_mask = d_to_nearest > backfill_spacing
+                filler_sph = cands_sph[far_mask]
+                n_filler = len(filler_sph)
+                if n_filler > 0:
+                    seeds_sph = np.vstack([seeds_sph, filler_sph])
+            """
 
-                    data_weight = density_to_gradient_weight
-                    grad_weight = 1 - data_weight
+            # 6. Optionally backfill model-volume gaps at the COARSE scale (max_cell_width_km)
+            n_data_cells = len(seeds_sph)
+            n_filler = 0
+            if enable_backfill and n_data_cells > 0:
+                seeds_xyz_arr = _to_xyz(seeds_sph)
+                seed_tree = cKDTree(seeds_xyz_arr)
 
-                    data_interpolator = None
-                    grad_interpolator = None
+                # Coarse spacing = one max-width cell (already in transformed-xyz km here,
+                # same units as the kd-tree distances and as target_init_width above).
+                backfill_spacing = max_cell_width_km if max_cell_width_km > 0 else bbox_diag * 0.1
 
-                    # Create interpolators for both fields
-                    if data_weight > 0:
-                        data_interpolator = scipy.interpolate.RegularGridInterpolator(
-                            self.grid_coords, data_density_3d, # n.b. data density is on the same model grid coords as velocity gradient
-                            bounds_error=False, fill_value=0.0
-                        )
-                    if grad_weight > 0:
-                        grad_interpolator = scipy.interpolate.RegularGridInterpolator(
-                            self.grid_coords, self.gradient_magnitude,
-                            bounds_error=False, fill_value=0.0
-                        )
+                # Candidate count ~ a coarse tiling of the model volume at that spacing.
+                # Nearly all candidates pass the far-from-data test (data footprint is
+                # tiny), so this is effectively the final filler count. Cap for safety.
+                corners = _to_xyz(np.array([min_coords, max_coords]))
+                model_volume = np.prod(np.abs(corners[1] - corners[0]))
+                n_candidates = int(np.clip(model_volume / backfill_spacing**3 * 2, 32, 20000))
 
-                    # Apply adjustment to each random cell
-                    for i in range(n_random):
-                        cell_pos = random_cells[i]
+                cands_sph = np.random.uniform(min_coords, max_coords, size=(n_candidates, 3))
+                cands_xyz = _to_xyz(cands_sph)
+                d_to_nearest, _ = seed_tree.query(cands_xyz, k=1)
+                far_mask = d_to_nearest > backfill_spacing
+                filler_sph = cands_sph[far_mask]
+                n_filler = len(filler_sph)
+                if n_filler > 0:
+                    seeds_sph = np.vstack([seeds_sph, filler_sph])
 
-                        # Parameters to sample density in local neighborhood. Bigger = better but slower
-                        search_radius = delta * 0.25 # delta is the full modelspace
-                        n_search = 10 # number of random searches
+            self.voronoi_cells = seeds_sph
 
-                        # Generate search points around current position
-                        search_offsets = np.random.uniform(-1, 1, (n_search, 3)) * search_radius
-                        search_points = cell_pos + search_offsets
 
-                        # Clip to model bounds
-                        search_points = np.clip(search_points, min_coords, max_coords)
+            # 7. Diagnostics
+            # Cell widths reported on data-driven cells only — backfill cells
+            # sit on a regular grid that would otherwise dominate the statistics
+            # and hide the data-adaptive cell-size variation.
+            seeds_data = seeds_sph[:n_data_cells]
+            if len(seeds_data) >= 2:
+                seeds_xyz_data = _to_xyz(seeds_data)
+                ctree = cKDTree(seeds_xyz_data)
+                nn_dists_data, _ = ctree.query(seeds_xyz_data, k=2)
+                cell_widths_km = nn_dists_data[:, 1] * 2.0
+                wp10, wp25, wp50, wp75, wp90 = np.percentile(
+                    cell_widths_km, [10, 25, 50, 75, 90]
+                )
+                width_mean = float(np.mean(cell_widths_km))
+            else:
+                wp10 = wp25 = wp50 = wp75 = wp90 = width_mean = 0.0
 
-                        # Evaluate where needed
-                        data_densities = 0; grad_densities = 0
-                        if data_interpolator is not None:
-                            data_densities = data_interpolator(search_points)
-                        if grad_interpolator is not None:
-                            grad_densities = grad_interpolator(search_points)
-
-                        # Combine densities
-                        combined_densities = data_weight*data_densities + grad_weight*grad_densities
-
-                        # Re-administer alpha bias as tends to get lost for adaptive
-                        if alpha > 1:
-                            # Calculate normalized depth (0 at surface, 1 at bottom)
-                            search_depths = (search_points[:, 0] - min_coords[0]) / delta[0]
-                            # Penalize deeper positions - stronger penalty for larger alpha
-                            #depth_bias = np.exp(-alpha * search_depths)  # Exponential decay with depth
-                            depth_bias = 1.0 - 0.5 * search_depths  # linear, 1.0 at surface, 0.5 at bottom
-                            combined_densities *= depth_bias
-
-                        # Current position combined density
-                        current_data = 0; current_grad = 0
-                        if data_interpolator is not None:
-                            current_data = data_interpolator(cell_pos.reshape(1, -1))[0]
-                        if grad_interpolator is not None:
-                            current_grad = grad_interpolator(cell_pos.reshape(1, -1))[0]
-                        current_combined = data_weight*current_data + grad_weight*current_grad
-
-                        # Apply same depth bias to current position
-                        if alpha > 1:
-                            current_depth = (cell_pos[0] - min_coords[0]) / delta[0]
-                            #current_combined *= np.exp(-alpha * current_depth)
-                            current_combined *= (1.0 - 0.5 * current_depth)
-
-                        # Find best position (highest combined density)
-                        best_idx = np.argmax(combined_densities)
-                        best_combined = combined_densities[best_idx]
-
-                        # Move toward best position if 3% (?) better
-                        if best_combined > current_combined * 1.03:
-                            move_vector = search_points[best_idx] - cell_pos
-                            new_pos = cell_pos + move_vector * adaptive_weight
-                            random_cells[i] = new_pos
-
-                # Ensure random cells are within bounds
-                random_cells = np.clip(random_cells, min_coords, max_coords)
-
-                # Mask random cells to station coverage footprint (not really helpful)
-                """
-                coverage_mask = self._build_station_coverage_mask(random_cells)
-                n_before = len(random_cells)
-                random_cells = random_cells[coverage_mask]
-                n_masked = n_before - len(random_cells)
-                if n_masked > 0:
-                    logger.info(f" Removed {n_masked}/{n_before} random cells outside coverage footprint")
-                """
-
-                # Combine k-medians cells (first) with random/adaptive cells (after)
-                if base_cells is not None:
-                    base_cells = np.vstack([base_cells, random_cells])
-                else:
-                    base_cells = random_cells
-
-            # Remove cells that are too close together
-            if self.cfg["algorithm"].get("remove_close_cells", True): # <<<< haven't put this in yet! automatically on / TODO
-                min_distance_rad = float(self.cfg["algorithm"]["min_dist"]) / 6371. * 2 # 2x the defined minimum distance
-                original_count = len(base_cells)
-
-                tree = cKDTree(base_cells)
-                close_pairs = tree.query_pairs(min_distance_rad)
-
-                # Preserve k-medians cells preferentially
-                to_remove = set()
-                for i, j in close_pairs:
-                    # If one is a k-medians cell and the other is not, remove the random one
-                    if i < kvoronoi and j >= kvoronoi:
-                        to_remove.add(j)
-                    elif j < kvoronoi and i >= kvoronoi:
-                        to_remove.add(i)
-                    else:
-                        # Both are same type, remove higher index
-                        to_remove.add(max(i, j))
-
-                keep_indices = [i for i in range(len(base_cells)) if i not in to_remove]
-                base_cells = base_cells[keep_indices]
-
-                if len(to_remove) > 0:
-                    logger.info(f" * generate_voronoi_cells: removed {len(to_remove)} too-close cells")
-                    # Update kvoronoi if any k-medians cells were removed
-                    kvoronoi = sum(1 for i in keep_indices if i < kvoronoi)
-
-            self.voronoi_cells = base_cells
-
-            # Diagnostics
-            cell_widths_km = self._estimate_voronoi_cell_widths_simple(base_cells)
-            n_rays = len(self.sampled_arrivals)
-            n_cells = len(self.voronoi_cells)
-
-            logger.info(f" Cell count: {n_cells} ({kvoronoi} k-medians, {n_cells-kvoronoi} random/adaptive)")
-            logger.info(f" Average horizontal cell width: {cell_widths_km:.1f} km")
+            logger.info(
+                f" Adaptive mesh: {len(seeds_sph)} cells "
+                f"({n_data_cells} data-driven, {n_filler} backfill); "
+                f"started with {n_initial}, performed {n_splits_total} splits "
+                f"in {refine_pass + 1} passes, then culled {n_culled} empty cells"
+            )
+            logger.info(
+                f" Cell width (km, {hvr}x vert compression, data-driven only): "
+                f"10%: {wp10:.1f} 25%: {wp25:.1f} 75%: {wp75:.1f} 90%: {wp90:.1f}, "
+                f"mean|median = {width_mean:.1f}|{wp50:.1f}"
+            )
 
         self.synchronize(attrs=["voronoi_cells"])
-
         return True
+
+
+    def _sample_initial_seeds(self, n, min_coords, max_coords, delta,
+                              density_interp, oversample=4):
+        """
+        Generate n initial seed positions in spherical model coords.
+
+        If density_interp is provided, uses rejection sampling biased by it
+        (more seeds where data density / gradient magnitude is higher).
+        Otherwise uniform random.
+        """
+        if density_interp is None:
+            return np.random.rand(n, 3) * delta + min_coords
+
+        # Generate oversample candidates uniform in model space, accept with
+        # probability density(candidate) / density.max()
+        candidates = np.random.rand(oversample * n, 3) * delta + min_coords
+        weights = density_interp(candidates)
+        wmax = max(weights.max(), 1e-9)
+        probs = weights / wmax
+        accept = np.random.rand(len(candidates)) < probs * np.random.uniform(0.9, 1.1) # add a bit of variability to the acceptance thresh
+        chosen = candidates[accept]
+
+        if len(chosen) >= n:
+            idx = np.random.choice(len(chosen), n, replace=False)
+            return chosen[idx]
+        # If we got fewer than n (low overall density), top up with uniform
+        deficit = n - len(chosen)
+        extra = np.random.rand(deficit, 3) * delta + min_coords
+        return np.vstack([chosen, extra])
+
+
+    @_utilities.root_only(RANK)
+    def _diagnose_mesh(self, phase):
+        """
+        Log post-meshing diagnostics
+        """
+        if self.sensitivity_matrix is None or self.voronoi_cells is None:
+            return
+
+        nvoronoi = len(self.voronoi_cells)
+        target_rpc = self.cfg["meshing"].get("target_rays_per_cell", 25)
+        min_rays = self.cfg["meshing"].get("min_rays_per_cell", 10)
+
+        sens = self.sensitivity_matrix.tocsr()[:, :nvoronoi].tocoo()
+        if sens.nnz == 0:
+            logger.warning("  diagnose_mesh: sensitivity matrix is empty")
+            return
+
+        pairs = np.unique(np.column_stack([sens.row, sens.col]), axis=0)
+        rays_per_cell = np.bincount(pairs[:, 1], minlength=nvoronoi)
+
+        # Compute quality stats over informed cells (rays > 0) only;
+        # report total mesh size separately for context.
+        informed_mask = rays_per_cell > 0
+        n_informed = int(informed_mask.sum())
+        n_empty    = nvoronoi - n_informed
+        informed_rpc = rays_per_cell[informed_mask]
+
+        if n_informed == 0:
+            logger.warning(f"  Mesh diagnostic: no informed cells (mesh has {nvoronoi} cells, all empty)")
+            return
+
+        n_under     = int(np.sum(informed_rpc < min_rays))
+        n_well      = int(np.sum(informed_rpc >= target_rpc * 0.5))
+
+        p10, p25, p50, p75, p90 = np.percentile(informed_rpc, [10, 25, 50, 75, 90])
+
+        logger.info(f"  Mesh diagnostic ({phase}, target {target_rpc} rays/cell):")
+        logger.info(f"    {n_informed} populated cells: "
+                    f"{n_under} ({100*n_under/n_informed:.1f}%) under min_rays ({min_rays}), "
+                    f"{n_well} ({100*n_well/n_informed:.1f}%) well-resolved")
+        logger.info(f"    rays-per-cell 10%: {p10:.0f}, 25%: {p25:.0f}, 50%: {p50:.0f}, 75%: {p75:.0f}, 90%: {p90:.0f}")
 
 
     def _estimate_data_density(self, phase, adaptive_weight):
@@ -1380,7 +1858,84 @@ class InversionIterator(object):
         return
 
 
+    @_utilities.log_errors(logger)
     def _sample_raypaths(self, phase):
+        """
+        Get raypath points from stored HDF5 files.
+
+        Returns
+        -------
+        points : (N, 3) float array
+            All raypath sample points concatenated.
+        ray_ids : (N,) int array
+            Ray ID for each point. Points with the same ray_id belong to the
+            same arrival/ray. Ray IDs are unique within a realization but have
+            no meaning across realizations.
+        """
+        point_chunks = []
+        ray_id_chunks = []
+        next_ray_id = 0
+     
+        logger.debug("Model depth range: %.2f to %.2f" % (
+            6371 - self.pwave_model.min_coords[0],
+            6371 - self.pwave_model.max_coords[0]
+        ))
+
+        arrivals = self.sampled_arrivals.set_index(["network", "station"]).sort_index()
+        index = arrivals.index.unique()
+        events = self.events.set_index("event_id")
+        events["idx"] = np.arange(len(events))
+
+        for network, station in index:
+            filename = f"{network}.{station}.{phase}.h5"
+            path = os.path.join(self.raypath_dir, filename)
+            with h5py.File(path, mode="r") as raypath_file:
+                event_ids = arrivals.loc[[(network, station)], "event_id"]
+                idxs = events.loc[event_ids, "idx"]
+                idxs = np.sort(idxs).astype(int)
+                raypoints = raypath_file[phase][:, idxs]
+                # raypoints: shape (3, n_events), object array; each cell is a
+                # 1D float array of coordinate samples along that ray.
+
+                if raypoints.ndim > 1:
+                    n_events = raypoints.shape[1]
+                    # Per-event ray length = length of the rho-coordinate array
+                    # (all 3 components have the same length per ray)
+                    for j in range(n_events):
+                        rho   = np.asarray(raypoints[0, j], dtype=float)
+                        theta = np.asarray(raypoints[1, j], dtype=float)
+                        phi   = np.asarray(raypoints[2, j], dtype=float)
+                        n_pts = len(rho)
+                        if n_pts == 0:
+                            continue
+                        one_ray = np.column_stack([rho, theta, phi])  # (n_pts, 3)
+                        point_chunks.append(one_ray)
+                        ray_id_chunks.append(np.full(n_pts, next_ray_id, dtype=np.int32))
+                        next_ray_id += 1
+                else:
+                    # Single-event station: raypoints is shape (3,), each cell a 1D array
+                    rho   = np.asarray(raypoints[0], dtype=float)
+                    theta = np.asarray(raypoints[1], dtype=float)
+                    phi   = np.asarray(raypoints[2], dtype=float)
+                    n_pts = len(rho)
+                    if n_pts > 0:
+                        one_ray = np.column_stack([rho, theta, phi])
+                        point_chunks.append(one_ray)
+                        ray_id_chunks.append(np.full(n_pts, next_ray_id, dtype=np.int32))
+                        next_ray_id += 1
+
+        if not point_chunks:
+            return np.empty((0, 3), dtype=float), np.empty(0, dtype=np.int32)
+
+        points  = np.vstack(point_chunks).astype(float, copy=False)
+        ray_ids = np.concatenate(ray_id_chunks)
+        logger.debug(f"_sample_raypaths: {len(points)} points across "
+                     f"{next_ray_id} unique rays "
+                     f"(avg {len(points)/max(next_ray_id,1):.1f} pts/ray)")
+        return points, ray_ids
+
+
+    def _sample_raypaths_OLD(self, phase):
         """
         Get raypath points from stored HDF5 files
         """
@@ -1460,11 +2015,98 @@ class InversionIterator(object):
         return item
 
 
+    def _stack_statistic(self, stack_ma):
+        """
+        The stack statistic that defines the final model update
+        (trimmed mean or median per algorithm.stack_trim_percent and
+        algorithm.stack_type), computed over a masked realization stack.
+        Shared by update_model() and the convergence check so that
+        "converged" means converged in the quantity that actually
+        matters.
+        """
+        trim_fraction = self.cfg["algorithm"].get("stack_trim_percent", 0)
+        trim_fraction = np.clip(float(trim_fraction / 100), 0, 0.485)
+
+        if trim_fraction > 0:
+            n = stack_ma.shape[0]
+            n_trim = int(n * trim_fraction)
+            if n_trim > 0 and n > 2 * n_trim:
+                stack_ma = np.ma.sort(stack_ma, axis=0)[n_trim:-n_trim]
+
+        stack_type = self.cfg["algorithm"].get("stack_type")
+        if stack_type.lower() == "median":
+            return np.ma.median(stack_ma, axis=0)
+        else:
+            return np.ma.mean(stack_ma, axis=0)
+
+
+    def _stack_converged(self, phase, nreal):
+        """
+        Adaptive early stopping: decide (on ROOT, broadcast to all ranks)
+        whether adding further realizations would change the final stack
+        by less than algorithm.stack_convergence_tol.
+
+        Metric: RMS(S_n - S_prev) / RMS(S_n) over valid nodes, where S is
+        the running _stack_statistic and S_prev is the statistic at the
+        previous check (check_every realizations earlier). Must stay
+        below tol for `patience` consecutive checks. Returns True to
+        break the realization loop; MUST be called by ALL ranks.
+        """
+        cfg = self.cfg["algorithm"]
+        tol = cfg.get("stack_convergence_tol")
+
+        decision = False
+        if RANK == ROOT_RANK and tol > 0:
+            n_done = self.ireal + 1
+            min_nreal = max(int(cfg.get("stack_convergence_min_nreal")), 2)
+            check_every = max(int(cfg.get("stack_convergence_check_every")), 1)
+            patience = max(int(cfg.get("stack_convergence_patience")), 1)
+
+            if n_done >= min_nreal and (n_done - min_nreal) % check_every == 0:
+                dataset = self._f5_workspace[f"{phase.lower()}wave_stack"]
+                raw = dataset[:n_done]
+                stack_ma = np.ma.masked_invalid(raw)
+                current = self._stack_statistic(stack_ma)
+
+                state = self._stack_conv_state.setdefault(
+                    phase, {"prev": None, "passes": 0}
+                )
+                if state["prev"] is not None:
+                    diff = current - state["prev"]
+                    denom = np.sqrt(np.ma.mean(current ** 2)) + 1e-30
+                    metric = float(np.sqrt(np.ma.mean(diff ** 2)) / denom)
+                    state["passes"] = (
+                        state["passes"] + 1 if metric < tol else 0
+                    )
+                    logger.info(
+                        f"  stack convergence [{phase}]: rel change = "
+                        f"{metric:.4f} over last {check_every} realization(s) "
+                        f"(tol {tol:.4f}, pass {state['passes']}/{patience}, "
+                        f"n={n_done}/{nreal})   ###"
+                    )
+                    if state["passes"] >= patience:
+                        decision = True
+                        logger.info(
+                            f"  stack converged for {phase} after {n_done} "
+                            f"of {nreal} realizations; skipping the "
+                            f"remaining {nreal - n_done}   ###"
+                        )
+                state["prev"] = current
+
+        decision = COMM.bcast(decision, root=ROOT_RANK)
+        return decision
+
+
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def _reset_realization_stack(self, phase):
         """ Reset the realization stack by deleting and recreating """
         phase = phase.lower()
+
+        if not hasattr(self, "_stack_conv_state"):
+            self._stack_conv_state = {}
+        self._stack_conv_state.pop(phase, None)
+        self._stack_conv_state.pop(phase.upper(), None)
 
         for prefix in ["wave", "qual"]:
             handle = f"{phase}{prefix}_realization_stack"
@@ -1490,7 +2132,7 @@ class InversionIterator(object):
 
             arrivals = self.arrivals[
                 (self.arrivals["phase"] == phase) & 
-                (self.arrivals["delta"] >= min_dist) & 
+                (self.arrivals["slant_dist"] >= min_dist) & 
                 (self.arrivals["delta"] <= max_dist)
             ]
 
@@ -1514,7 +2156,22 @@ class InversionIterator(object):
                 if 'weight' not in arrivals.columns:
                     arrivals['weight'] = 1.0
                     logger.warning("arrivals['weight'] column missing in sample_arrivals??   ###")
-                arrivals = arrivals.sample(n=narrival, weights="weight")
+                always_include = self.cfg["model"].get("always_include_truepicks", True)
+                if (always_include and "truepick" in arrivals.columns and arrivals["truepick"].any()):
+                    # ground-truth picks constrain EVERY realization: sample
+                    # the remainder, then union the truepicks back in
+                    true_arrivals = arrivals[arrivals["truepick"]]
+                    rest = arrivals[~arrivals["truepick"]]
+                    n_rest = max(narrival - len(true_arrivals), 0)
+                    if n_rest > 0 and n_rest < len(rest):
+                        rest = rest.sample(n=n_rest, weights="weight")
+                    arrivals = pd.concat([true_arrivals, rest])
+                    logger.debug(
+                        f"sampled_arrivals: {len(true_arrivals)} truepicks "
+                        f"force-included + {len(rest)} sampled   ###"
+                    )
+                else:
+                    arrivals = arrivals.sample(n=narrival, weights="weight")
 
             self.sampled_arrivals = arrivals
 
@@ -1540,7 +2197,7 @@ class InversionIterator(object):
                 max_evt_resid = self.cfg["algorithm"]["max_event_residual"]
                 n0 = len(self.events)
                 events = _utilities.remove_outliers(self.events, None, "residual", max_evt_resid)
-                if len(self.events) < 0.75*n0:
+                if len(events) < 0.75*n0:
                     logger.warn(f"FYI: remove_outliers removed {(n0-len(self.events))/n0*100:.1f}% of your events!   ###")
             else:
                 events = self.events
@@ -1580,6 +2237,7 @@ class InversionIterator(object):
             events = self.events
             events = events.set_index("event_id")
             events["idx"] = range(len(events))
+            n_events = len(events)
 
             # Precompute spherical coords for all events once instead
             coords_cache = {}
@@ -1587,19 +2245,23 @@ class InversionIterator(object):
                 coords = event[["latitude", "longitude", "depth"]]
                 coords_cache[event_id] = geo2sph(coords).astype(dtype=_constants.DTYPE_REAL)
 
+            # Pre-compute event_id to idx mapping
+            idx_cache = dict(zip(events.index, events["idx"]))
+
+            # Precompute station -> event_ids mapping once
+            station_event_ids = {
+                key: grp["event_id"].values
+                for key, grp in arrivals.groupby(level=[0, 1])
+            }
+
             _path = self.traveltime_inventory_path
             with TraveltimeInventory(_path, mode="r") as traveltime_inventory:
                 while True:
-
                     item = self._request_dispatch()
-
-                    if item is None:
-                        break
+                    if item is None: break
 
                     network, station = item
                     handle = "/".join([network, station, phase])
-
-                    traveltime = traveltime_inventory.read(handle)
 
                     filename = ".".join([network, station, phase])
                     path = os.path.join(raypath_dir, filename + ".h5")
@@ -1607,30 +2269,34 @@ class InversionIterator(object):
 
                     if phase not in raypath_file:
                         dtype = h5py.vlen_dtype(_constants.DTYPE_REAL)
-                        dataset = raypath_file.create_dataset(
-                            phase,
-                            (3, len(events),),
-                            dtype=dtype
-                        )
+                        dataset = raypath_file.create_dataset(phase,(3, n_events,), dtype=dtype)
                     else:
                         dataset = raypath_file[phase]
 
-                    event_ids = arrivals.loc[[(network, station)], "event_id"].values
+                    event_ids = station_event_ids[(network, station)]
 
-                    # establish a bool here per event rather than load all the arrivals
+                    # Establish a bool here per event rather than load all the arrivals
                     if "traced" not in raypath_file:
                         initial_traced = np.array([
                             np.stack(dataset[:, i]).size != 0
-                            for i in range(len(events))
+                            for i in range(n_events)
                         ])
                         raypath_file.create_dataset("traced", data=initial_traced)
                     traced = raypath_file["traced"][:]
 
+                    # Early exit: if every event for this station is already traced, skip
+                    needed_indices = np.fromiter(map(idx_cache.__getitem__, event_ids), dtype=int, count=len(event_ids))
+                    if traced[needed_indices].all():
+                        raypath_file.close()
+                        continue
+                    else:
+                        traveltime = traveltime_inventory.read(handle)
+                        traced0 = traced.copy() # n.b. this is just a small bool array
+
                     for event_id in event_ids:
 
-                        idx = int(events.loc[event_id, "idx"])
-                        if traced[idx]:
-                            continue
+                        idx = idx_cache[event_id]
+                        if traced[idx]: continue
 
                         coords = coords_cache[event_id]
 
@@ -1663,7 +2329,8 @@ class InversionIterator(object):
                                 logger.warning(f"...couldn't fix traveltime: {e}")
                                 continue
 
-                    raypath_file["traced"][:] = traced
+                    if not np.array_equal(traced,traced0):
+                        raypath_file["traced"][:] = traced
                     raypath_file.close()
 
         COMM.barrier()
@@ -1716,8 +2383,8 @@ class InversionIterator(object):
             self.event_history = self.event_history[history_event_mask].reset_index(drop=True)
 
             # Add residuals for current iteration / create a mapping for efficient lookup
-            arrival_residual_map = dict(zip(self.arrivals['arrival_id'], self.arrivals['residual'].abs()))
-            event_residual_map = dict(zip(self.events['event_id'], self.events['residual'].abs()))
+            arrival_residual_map = dict(zip(self.arrivals['arrival_id'], self.arrivals['residual']))
+            event_residual_map = dict(zip(self.events['event_id'], self.events['residual']))
 
             # Update histories
             self.arrival_history[f'iter_{self.iiter}'] = (
@@ -1733,8 +2400,8 @@ class InversionIterator(object):
 
 
             ##### Arrival improvements
-            prev_arrival_residuals = self.arrival_history[prev_col]
-            curr_arrival_residuals = self.arrival_history[curr_col]
+            prev_arrival_residuals = self.arrival_history[prev_col].abs() # we want the abs value for these !
+            curr_arrival_residuals = self.arrival_history[curr_col].abs()
 
             # if safe_residual is None, then set to mean
             if not safe_residual:
@@ -1764,16 +2431,16 @@ class InversionIterator(object):
             arrivals_to_remove = self.arrival_history.loc[outlier_mask, 'arrival_id'].values
 
             # Calculate mean improvement using mean of residuals
-            mean_prev_arrival = self.arrival_history[prev_col].mean()
-            mean_curr_arrival = self.arrival_history[curr_col].mean()
+            mean_prev_arrival = self.arrival_history[prev_col].abs().mean()
+            mean_curr_arrival = self.arrival_history[curr_col].abs().mean()
             mean_arrival_improvement = ((mean_prev_arrival - mean_curr_arrival) / mean_prev_arrival) * 100 if mean_prev_arrival > 0 else 0
             logger.info(f"Mean arrival residual reduction: {mean_arrival_improvement:.2f}% "
                    f"({mean_prev_arrival:.4f} -> {mean_curr_arrival:.4f})   ###")
 
 
             ##### Event improvements
-            prev_event_residuals = self.event_history[prev_col]
-            curr_event_residuals = self.event_history[curr_col]
+            prev_event_residuals = self.event_history[prev_col].abs()
+            curr_event_residuals = self.event_history[curr_col].abs()
 
             # if safe_residual is None, then set to 1 std below mean
             if not safe_residual:
@@ -1803,8 +2470,8 @@ class InversionIterator(object):
             events_to_remove = self.event_history.loc[event_outlier_mask, 'event_id'].values
 
             # Calculate mean improvement using mean of residuals
-            mean_prev_event = self.event_history[prev_col].mean()
-            mean_curr_event = self.event_history[curr_col].mean()
+            mean_prev_event = self.event_history[prev_col].abs().mean()
+            mean_curr_event = self.event_history[curr_col].abs().mean()
             mean_event_improvement = ((mean_prev_event - mean_curr_event) / mean_prev_event) * 100 if mean_prev_event > 0 else 0
             logger.info(f"Mean event residual reduction: {mean_event_improvement:.2f}% "
                    f"({mean_prev_event:.4f} -> {mean_curr_event:.4f})   ###")
@@ -1864,6 +2531,236 @@ class InversionIterator(object):
         self.synchronize(attrs=["arrivals","arrival_history","events","event_history"])
         return True
 
+    # new! track individual picks
+    @_utilities.log_errors(logger)
+    def analyze_pick_residuals(self):
+        """
+        Identify individual (event, station, phase) picks whose residuals are
+        persistently large AND consistent in sign across iterations, relative
+        to other picks at the same station/phase.
+
+        Writes <output_dir>/NN.bad_picks.csv with one row per flagged pick
+        and optionally removes them from self.arrivals.
+
+        Must be called AFTER track_residual_improvement() so the current
+        iteration's signed residual has been appended to arrival_history.
+
+        Config keys (under cfg["analyze"], all optional):
+          pick_start_iter         : int,   default 3
+          pick_min_iters_present  : int,   default 3
+          pick_drop               : bool,  default False
+          pick_median_threshold   : float, default 0.75   (seconds)
+          pick_mad_max            : float, default 0.15  (seconds)
+          pick_station_excess     : float, default 3.5
+          pick_max_drop_fraction  : float, default 0.02
+        """
+        cfg = self.cfg["analyze"]
+        start_iter        = cfg.get("pick_start_iter") # default 3
+        min_iters_present = cfg.get("pick_min_iters_present") # default 3
+        do_drop           = cfg.get("pick_drop") # default False
+        med_thresh        = cfg.get("pick_median_threshold") # default 0.5
+        mad_max           = cfg.get("pick_mad_max") # default 0.5
+        station_excess    = cfg.get("pick_station_excess") # default 2.5
+        max_drop_frac     = cfg.get("pick_max_drop_fraction") # default 0.10 (10%)
+        pick_scale_k      = cfg.get("pick_scale_k") # default 3.5
+
+        iter_cols = [c for c in self.arrival_history.columns if c.startswith("iter_")]
+        usable_iter_cols = [c for c in iter_cols if int(c.split("_")[1]) >= start_iter]
+
+        # Only starts tracking after back_pick_start_iter, and only starts counting after min_iters_persent (e.g. 6th iteration?)
+        if len(usable_iter_cols) < min_iters_present:
+            if RANK == ROOT_RANK:
+                logger.info(f"Analyze_pick_residuals: Not enough usable iterations yet ({len(usable_iter_cols)} < {min_iters_present}); skipping.   ###")
+            return True
+
+        # All analysis runs on ROOT_RANK; results broadcast at the end if we drop.
+        if RANK == ROOT_RANK:
+            logger.info(f"Analyzing per-pick residuals at iter {self.iiter}...   ###")
+
+            hist = self.arrival_history.copy()
+            vals = hist[usable_iter_cols].to_numpy(dtype=float)
+            n_present = np.sum(~np.isnan(vals), axis=1)
+
+            # ---------------------------------------------------------------
+            # Robust bilinear demeaning of the residual matrix.
+            #
+            # The raw post-relocation residual of pick i at iteration k is
+            # approximately:
+            #     r_ik = e_jk (event common-mode)  +  s_m (station static)
+            #          + p_i (true pick error)     +  noise
+            # Events contaminated by bad picks relocate to absorb them, which
+            # puts a persistent, consistent-sign common-mode offset e_jk on
+            # ALL of that event's picks. Flagging on the raw residual then
+            # (a) flags the event's GOOD picks (false positives) and
+            # (b) hides the bad pick, whose offset was partially absorbed.
+            # Removing the per-event median and per-station-phase median
+            # (two alternating robust passes) isolates the pick term p_i.
+            # ---------------------------------------------------------------
+            demean = bool(cfg.get("pick_demean", True)) ## TODO ADD TO CFG
+            if demean:
+                dm = pd.DataFrame(vals, copy=True)
+                ev_key = hist["event_id"].values
+                st_key = (hist["network"].astype(str) + "." +
+                          hist["station"].astype(str) + "." +
+                          hist["phase"].astype(str)).values
+                for _ in range(2):
+                    dm = dm - dm.groupby(ev_key).transform("median")
+                    dm = dm - dm.groupby(st_key).transform("median")
+                vals_dm = dm.to_numpy(dtype=float)
+            else:
+                vals_dm = vals
+
+            # Per-pick robust statistics over the usable iteration window
+            # (computed on the demeaned matrix)
+            pick_median = np.nanmedian(vals_dm, axis=1)
+            # MAD scaled to ~sigma-equivalent for a normal distribution
+            pick_mad = 1.4826 * np.nanmedian(
+                np.abs(vals_dm - pick_median[:, None]), axis=1
+            )
+            # Raw (un-demeaned) median kept for the diagnostic CSV
+            pick_median_raw = np.nanmedian(vals, axis=1)
+
+            event_time_map = dict(zip(self.events["event_id"], self.events["time"]))
+            pick_time_map  = dict(zip(self.arrivals["arrival_id"], self.arrivals["time"]))
+
+            stats = pd.DataFrame({
+                "arrival_id":   hist["arrival_id"].values,
+                "event_id":     hist["event_id"].values,
+                "event_time":   hist["event_id"].map(event_time_map).values,
+                "pick_time":    hist["arrival_id"].map(pick_time_map).values, 
+                "network":      hist["network"].values,
+                "station":      hist["station"].values,
+                "phase":        hist["phase"].values,
+                "n_iter":       n_present,
+                "median_resid": pick_median,
+                "median_resid_raw": pick_median_raw,
+                "mad_resid":    pick_mad,
+            })
+
+            # Per-station-phase median of |median_resid|. This is our local
+            # baseline; we only flag picks that stand out FROM THEIR OWN STATION.
+            # (After demeaning this is mostly a residual safety net; station
+            # statics have already been removed.)
+            stats["abs_median"] = stats["median_resid"].abs()
+            station_baseline = (
+                stats.groupby(["network", "station", "phase"])["abs_median"].transform("median")
+            )
+            stats["station_baseline"] = station_baseline
+
+            # Adaptive detection floor: the population MAD of the demeaned
+            # pick medians estimates the effective pick-noise scale of THIS
+            # dataset. The user threshold acts as a minimum, but if the data
+            # are noisier than the configured threshold we raise the floor
+            # instead of flooding the flags with noise-level picks.
+            pop_med  = np.nanmedian(stats["median_resid"])
+            noise_scale = 1.4826 * np.nanmedian(
+                np.abs(stats["median_resid"] - pop_med)
+            )
+            eff_thresh = max(med_thresh, pick_scale_k * noise_scale)
+
+            # Flag logic (all four must hold):
+            #  - present in enough iterations
+            #  - large signed median (consistent miss in one direction)
+            #  - stable: scatter small relative to BOTH an absolute cap and
+            #    the offset itself. A 2 s bad pick on an event whose
+            #    relocation wanders (mad ~0.5 s) is still obviously bad; a
+            #    hard mad<=mad_max gate would veto exactly those true
+            #    positives while passing common-mode-stabilized good picks.
+            #  - notably worse than the station's typical pick
+            eligible = stats["n_iter"] >= min_iters_present
+            large    = stats["abs_median"] >= eff_thresh
+            tight    = stats["mad_resid"] <= np.maximum(
+                mad_max, 0.5 * stats["abs_median"]
+            )
+            excess   = stats["abs_median"] >= station_excess * (station_baseline + 1e-6)
+
+            stats["flag_bad_pick"] = eligible & large & tight & excess
+            logger.info(
+                f"analyze_pick_residuals: noise_scale={noise_scale:.3f}s, "
+                f"effective |median| threshold={eff_thresh:.3f}s   ###"
+            )
+            # Keep for event diagnostics
+            self._pick_stats = stats
+
+            n_flagged = int(stats["flag_bad_pick"].sum())
+            n_total   = len(stats)
+            frac      = n_flagged / max(n_total, 1)
+
+            logger.info(
+                f"Bad-pick flags: {n_flagged}/{n_total} ({100*frac:.2f}%)  "
+                f"thresholds: |med|>={med_thresh}, mad<={mad_max}, "
+                f"station_excess>={station_excess}x   ###"
+            )
+
+            # Always write the diagnostic CSV (whether or not we drop)
+            flagged = stats[stats["flag_bad_pick"]].sort_values(
+                "abs_median", ascending=False
+            )
+            out_path = os.path.join(
+                self.cfg["model"]["output_dir"],
+                f"{self.iiter:02d}.bad_picks.csv"
+            )
+            cols_out = ["arrival_id", "event_id", "event_time", "pick_time",
+                        "network", "station", "phase",
+                        "n_iter", "median_resid", "median_resid_raw",
+                        "mad_resid", "station_baseline"]
+
+            out = flagged[cols_out].copy()
+
+            # Format epoch-second timestamps as ISO 8601 (UTC, millisecond precision)
+            out["event_time"] = pd.to_datetime(out["event_time"], unit="s", utc=True, errors="coerce")
+            out["event_time"] = out["event_time"].dt.strftime("%Y-%m-%dT%H:%M:%S.%f").str[:-3] + "Z"
+            out["event_time"] = out["event_time"].fillna("")
+
+            out["pick_time"] = pd.to_datetime(out["pick_time"], unit="s", utc=True, errors="coerce")
+            out["pick_time"] = out["pick_time"].dt.strftime("%Y-%m-%dT%H:%M:%S.%f").str[:-3] + "Z"
+            out["pick_time"] = out["pick_time"].fillna("")
+
+            # Round float residual columns only (don't apply .round() to whole frame)
+            for c in ["median_resid", "median_resid_raw", "mad_resid", "station_baseline"]:
+                out[c] = out[c].round(4)
+            out.to_csv(out_path, index=False)
+            logger.info(f"Wrote bad-pick diagnostics to {out_path}   ###")
+
+            # Safety: refuse to drop too many in one shot
+            if do_drop:
+                if frac > max_drop_frac:
+                    logger.warning(
+                        f"Would drop {100*frac:.2f}% of arrivals "
+                        f"(> {100*max_drop_frac:.2f}% cap). "
+                        f"NOT dropping. Inspect {out_path} and tighten thresholds "
+                        f"or raise pick_max_drop_fraction.   ###"
+                    )
+                elif n_flagged > 0:
+                    ids_to_drop = flagged["arrival_id"].values
+                    if "truepick" in self.arrivals.columns:
+                        protected_ids = self.arrivals.loc[
+                            self.arrivals["truepick"].fillna(False).astype(bool),
+                            "arrival_id"
+                        ].values
+                        n_protected = np.isin(ids_to_drop, protected_ids).sum()
+                        if n_protected > 0:
+                            logger.info(
+                                f"analyze_pick_residuals: {n_protected} "
+                                f"flagged picks are truepicks; NOT dropping them   ###"
+                            )
+                            ids_to_drop = ids_to_drop[
+                                ~np.isin(ids_to_drop, protected_ids)
+                            ]
+                    before = len(self.arrivals)
+                    self.arrivals = self.arrivals[
+                        ~self.arrivals["arrival_id"].isin(ids_to_drop)
+                    ].reset_index(drop=True)
+                    self.arrival_history = self.arrival_history[
+                        ~self.arrival_history["arrival_id"].isin(ids_to_drop)
+                    ].reset_index(drop=True)
+                    logger.info(
+                        f"Dropped {before - len(self.arrivals)} bad-pick arrivals (of {before}).   ###"
+                    )
+
+        self.synchronize(attrs=["arrivals", "arrival_history"])
+        return True
+
 
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
@@ -1874,29 +2771,57 @@ class InversionIterator(object):
         """
         logger.info("Saving event diagnostics...   ###")
 
-        threshold_residual = self.cfg["algorithm"].get("flag_residual_threshold", 0.6)
-        threshold_weight   = self.cfg["algorithm"].get("flag_weight_threshold", 0.01)
-        threshold_std      = self.cfg["algorithm"].get("flag_std_threshold", 0.5)
+        threshold_residual = self.cfg["analyze"].get("event_residual_threshold", 0.6)
+        threshold_weight   = self.cfg["analyze"].get("event_weight_threshold", 0.01)
+        threshold_std      = self.cfg["analyze"].get("event_std_threshold", 0.5)
 
         events   = self.events.copy()
         arrivals = self.arrivals.copy()
 
+        # Robust per-event statistics. Mean/std are dominated by a single
+        # gross pick: one 4 s outlier among 20 arrivals adds 0.2 s to the
+        # mean |residual| and blows up the std, flagging an otherwise
+        # well-located event. Median/MAD answer "is the EVENT bad?", while
+        # the pick-level analysis answers "does the event contain bad picks?".
+        def _mad(x):
+            x = np.asarray(x, dtype=float)
+            m = np.nanmedian(x)
+            return 1.4826 * np.nanmedian(np.abs(x - m))
+
         event_stats = arrivals.groupby('event_id').agg(
-            n_arrivals    = ('arrival_id', 'count'),
-            mean_residual = ('residual', 'mean'),
-            abs_residual  = ('residual', lambda x: x.abs().mean()),
-            std_residual  = ('residual', 'std'),
-            mean_weight   = ('weight', 'mean'),
+            n_arrivals      = ('arrival_id', 'count'),
+            mean_residual   = ('residual', 'mean'),
+            median_residual = ('residual', 'median'),
+            abs_residual    = ('residual', lambda x: x.abs().median()),
+            std_residual    = ('residual', 'std'),
+            mad_residual    = ('residual', _mad),
+            mean_weight     = ('weight', 'mean'),
         ).reset_index()
 
         events = events.merge(event_stats, on='event_id', how='left')
 
+        # Fold in pick-level flags if analyze_pick_residuals has run:
+        # contaminated-but-well-located events get their own flag instead of
+        # polluting the location-quality flags.
+        pick_stats = getattr(self, "_pick_stats", None)
+        if pick_stats is not None:
+            n_flagged_picks = (
+                pick_stats.groupby("event_id")["flag_bad_pick"].sum()
+                .rename("n_flagged_picks")
+            )
+            events = events.merge(n_flagged_picks, on="event_id", how="left")
+            events["n_flagged_picks"] = events["n_flagged_picks"].fillna(0).astype(int)
+        else:
+            events["n_flagged_picks"] = 0
+
         events['flag_high_residual'] = events['abs_residual'] > threshold_residual
         events['flag_low_weight']    = events['mean_weight']  < threshold_weight
         events['flag_few_arrivals']  = events['n_arrivals']   < self.cfg["algorithm"]["min_narrival"]
-        events['flag_high_std']      = events['std_residual'] > threshold_std
+        events['flag_high_std']      = events['mad_residual'] > threshold_std
+        events['flag_bad_picks']     = events['n_flagged_picks'] > 0
         events['n_flags'] = events[['flag_high_residual', 'flag_low_weight',
-                                     'flag_few_arrivals',  'flag_high_std']].sum(axis=1)
+                                     'flag_few_arrivals',  'flag_high_std',
+                                     'flag_bad_picks']].sum(axis=1)
 
         events = events.round(5) # round sig figs to something sane
         # put event_id as column 1
@@ -1918,22 +2843,29 @@ class InversionIterator(object):
         """
         logger.info("Saving station diagnostics...   ###")
 
-        threshold_residual = self.cfg["algorithm"].get("flag_residual_threshold", 0.5)
-        threshold_std      = self.cfg["algorithm"].get("flag_std_threshold", 0.5)
+        threshold_residual = self.cfg["analyze"].get("station_residual_threshold", 0.5)
+        threshold_std      = self.cfg["analyze"].get("station_std_threshold", 0.5)
 
         arrivals = self.arrivals.copy()
 
+        def _mad(x):
+            x = np.asarray(x, dtype=float)
+            m = np.nanmedian(x)
+            return 1.4826 * np.nanmedian(np.abs(x - m))
+
         station_stats = arrivals.groupby(['network', 'station', 'phase']).agg(
-            n_arrivals    = ('arrival_id', 'count'),
-            mean_residual = ('residual', 'mean'),
-            abs_residual  = ('residual', lambda x: x.abs().mean()),
-            std_residual  = ('residual', 'std'),
-            mean_weight   = ('weight', 'mean'),
+            n_arrivals      = ('arrival_id', 'count'),
+            mean_residual   = ('residual', 'mean'),
+            median_residual = ('residual', 'median'),
+            abs_residual    = ('residual', lambda x: x.abs().median()),
+            std_residual    = ('residual', 'std'),
+            mad_residual    = ('residual', _mad),
+            mean_weight     = ('weight', 'mean'),
         ).reset_index()
 
         station_stats['flag_high_residual'] = station_stats['abs_residual'] > threshold_residual
-        station_stats['flag_high_std']      = station_stats['std_residual'] > threshold_std
-        station_stats['flag_high_mean']     = station_stats['mean_residual'].abs() > threshold_residual  # systematic bias
+        station_stats['flag_high_std']      = station_stats['mad_residual'] > threshold_std
+        station_stats['flag_high_mean']     = station_stats['median_residual'].abs() > threshold_residual  # systematic bias
         station_stats['n_flags'] = station_stats[['flag_high_residual',
                                                    'flag_high_std',
                                                    'flag_high_mean']].sum(axis=1)
@@ -1971,7 +2903,7 @@ class InversionIterator(object):
             # Handle zero-variance dimensions
             mask_zero_iqr = data_iqr == 0
             if np.any(mask_zero_iqr):
-                logger.warning(f"Zero variance detected in dimensions: {kde_columns[mask_zero_iqr]}   ###")
+                logger.warning(f"Zero variance detected in dimensions: {np.array(kde_columns)[mask_zero_iqr]}   ###")
                 data_iqr[mask_zero_iqr] = np.median(data_iqr[~mask_zero_iqr])
 
             # Normalize
@@ -1985,7 +2917,6 @@ class InversionIterator(object):
             bandwidth = bandwidth_scott
 
             try:
-
                 # Fit and evaluate KDE
                 kde = kp.FFTKDE(kernel='gaussian',bw=bandwidth).fit(data_normalized)
                 points, values = kde.evaluate(npts)
@@ -2026,16 +2957,23 @@ class InversionIterator(object):
                 # Monitor how weights are being capped
                 uncapped_max = weights[np.isfinite(weights)].max()
                 cap_ratio = uncapped_max / weight_cap  # how much the highest weight exceeds the cap
-                if cap_ratio > 2.0:
+                if cap_ratio > 5.0:
                     logger.info(f"  95th percentile weight cap={weight_cap:.2f}, max_uncapped={uncapped_max:.2f} ({cap_ratio:.1f}x cap)   ###")
 
                 # Cap & Normalise
                 weights = np.minimum(weights, weight_cap)
+
+                # Ground-truth picks always carry the maximum weight so
+                # they are preferentially drawn in every realization /// NOT IN EVENTS KDE!!
+                #if "truepick" in arrivals.columns:
+                #    is_true = arrivals["truepick"].fillna(False).astype(bool).values
+                #    if is_true.any():
+                #        weights[is_true] = weight_cap
                 weight_sum = weights.sum()
                 if weight_sum > 0:
                     weights = weights / weight_sum
                 else:
-                    logger.warning(f"  KDE event weights sum to zero for {phase} (!), using uniform weights   ###")
+                    logger.warning(f"  KDE event weights sum to zero for (!), using uniform weights   ###")
                     weights = np.ones(len(weights)) / len(weights)
 
                 # Set any problem infinite or NaN values to 0
@@ -2119,13 +3057,13 @@ class InversionIterator(object):
                 dlon = arrivals["event_longitude"] - arrivals["station_longitude"]
                 arrivals["azimuth"] = np.arctan2(dlat, dlon)
 
-                # Also done in sanitize_data, but doing it here ensures updated each iteration
-                arrivals["delta"] = _utilities.dist_deg(
+                # Now done in re-sanitize_data also but whatever (TODO sanity check)
+                # Note that using km is more sound for KDE especially near the poles
+                arrivals["delta"] = _utilities.dist_km(
                     arrivals["event_latitude"],
                     arrivals["event_longitude"],
                     arrivals["station_latitude"],
-                    arrivals["station_longitude"]
-                )
+                    arrivals["station_longitude"])
 
                 # Prepare data for KDE
                 kde_columns = ["event_latitude", "event_longitude", "event_depth", "azimuth", "delta"]
@@ -2181,6 +3119,14 @@ class InversionIterator(object):
 
                 # Cap & Normalise
                 weights = np.minimum(weights, weight_cap)
+
+                # Ground-truth picks always carry the maximum weight so
+                # they are preferentially drawn in every realization
+                if "truepick" in arrivals.columns:
+                    is_true = arrivals["truepick"].fillna(False).astype(bool).values
+                    if is_true.any():
+                        weights[is_true] = weight_cap
+
                 weight_sum = weights.sum()
                 if weight_sum > 0:
                     weights = weights / weight_sum
@@ -2290,28 +3236,60 @@ class InversionIterator(object):
         # Sometimes makes sense to just calculate the specific phase tables
         run_phases = run_phases or self.phases
 
+        # Compute a global max traveltime from the data, +8% margin
+        # Pass to solver to truncate FMM beyond what we'll ever need.
         if RANK == ROOT_RANK:
+            event_time = dict(zip(self.events["event_id"], self.events["time"]))
+            tt_observed = (
+                self.arrivals["time"] - self.arrivals["event_id"].map(event_time)
+            )
+            max_tt_data = float(tt_observed.quantile(0.999)) # 99.9% just in case one wild pick in there
+            max_tt = max_tt_data* 1.08 # 8% higher
+            logger.info(
+                f"  max observed traveltime: {max_tt_data:.2f}s, solver tt cap at {max_tt:.1f}   ###"
+            )
+        else:
+            max_tt = None
+        max_tt = COMM.bcast(max_tt, root=ROOT_RANK)
+
+        # Build the (station, phase) work list from what the post-QC catalog
+        # actually needs, not every station in the geometry file.
+        arrivals_by_phase = {
+            p: self.arrivals[self.arrivals["phase"] == p] for p in run_phases
+        }
+        needed_by_phase = {
+            p: set(zip(a["network"], a["station"]))
+            for p, a in arrivals_by_phase.items()
+        }
+        all_geometry_ids = set(zip(self.stations["network"], self.stations["station"]))
+        needed_any_phase = set().union(*needed_by_phase.values())
+        needed_by_phase = COMM.bcast(needed_by_phase, root=ROOT_RANK)
+
+        if RANK == ROOT_RANK:
+            skipped = all_geometry_ids - needed_any_phase
+            if skipped:
+                logger.info(
+                    f"  skipping tt creation of {len(skipped)}/{len(all_geometry_ids)} stations "
+                    f"with no post-QC arrivals in any phase   ###"
+                )
             logger.info(f"  Building traveltimes here: {traveltime_dir}")
             os.makedirs(traveltime_dir, exist_ok=True)
-            ids = zip(self.stations["network"], self.stations["station"])
-            self._dispatch(sorted(ids))
+            ids = sorted(needed_any_phase)
+            self._dispatch(ids)
         else:
             geometry = self.stations
             geometry = geometry.set_index(["network", "station"])
-
             while True:
                 item = self._request_dispatch()
-
-                if item is None:
-                    break
+                if item is None: break
 
                 network, station = item
-
                 keys = ["latitude", "longitude", "depth"]
                 coords = geometry.loc[(network, station), keys]
                 coords = geo2sph(coords)
 
                 for phase in run_phases:
+                    if (network, station) not in needed_by_phase[phase]: continue # don't compute tt's if not needed!
                     handle = f"{phase.lower()}wave_model"
                     model = getattr(self, handle)
                     solver = PointSourceSolver(coord_sys="spherical")
@@ -2320,13 +3298,27 @@ class InversionIterator(object):
                     solver.vv.npts = model.npts
                     solver.vv.values = model.values
                     solver.src_loc = coords
-                    solver.solve()
+                    solver.solve(max_traveltime=max_tt) # capping traveltime to some % above the max to save CPU
 
                     # Reset undefined to some max value in case some actual glitches show up
                     if np.any(~np.isfinite(solver.tt.values)):
-                        logger.debug(f"inf values found in solver.tt for {network}.{station}.{phase} ...no problem, setting these out of reach")
-                        max_val = np.max(solver.tt.values[np.isfinite(solver.tt.values)])
-                        solver.tt.values[~np.isfinite(solver.tt.values)] = 1.01 * max_val
+                        logger.info(f"inf values found in solver.tt for {network}.{station}.{phase} ...no problem, setting these out of reach")
+                        try:
+                            max_val = np.max(solver.tt.values[np.isfinite(solver.tt.values)])
+                            solver.tt.values[~np.isfinite(solver.tt.values)] = 1.01 * max_val
+                        except Exception as e:
+                            n_finite = int(np.sum(np.isfinite(solver.tt.values)))
+                            if n_finite < 2:
+                                logger.warning(
+                                    f"could not fix {network}.{station}.{phase}: only "
+                                    f"{n_finite} finite values in tt array ({e!r})"
+                                )
+                            else:
+                                logger.warning(
+                                    f"mystery issue with {network}.{station}.{phase} "
+                                    f"(possible elevation/coord issue): {e!r}"
+                                )
+                            continue
 
                     path = os.path.join(traveltime_dir,f"{network}.{station}.{phase}.h5")
                     solver.tt.to_hdf(path)
@@ -2337,11 +3329,40 @@ class InversionIterator(object):
             _path = self.traveltime_inventory_path
             if os.path.isfile(_path):
                 os.remove(_path)
+
+            # Distance-limited, compressed storage (new pykonal): each
+            # station's grid is cropped to tt_crop_km. Auto mode derives
+            # the crop from algorithm.max_dist (the tomography arrival
+            # cutoff) with a 10% margin so no usable ray can graze the
+            # crop edge. 
+            # mask defaults to False here:
+            # ray tracing descends the traveltime gradient and must not meet NaN node
+            crop_km = self.cfg["algorithm"].get("tt_crop_km", -1)
+            if crop_km is None or crop_km < 0:
+                max_dist = self.cfg["algorithm"]["max_dist"] # km
+                crop_km = max_dist * 1.10
+            crop_km = None if crop_km == 0 else float(crop_km)
+            crop_mask = False # bool(self.cfg["algorithm"].get("tt_crop_mask", False))
+
+            _station_coords = _utilities.station_dict(self.stations)
+
             with TraveltimeInventory(_path, mode="w") as tt_inventory:
                 pattern = os.path.join(traveltime_dir, "*.h5")
                 paths = glob.glob(pattern)
                 paths = sorted(paths)
-                tt_inventory.merge(paths)
+                tt_inventory.merge(
+                    paths,
+                    station_coords=_station_coords,
+                    max_dist=crop_km,
+                    mask=crop_mask,
+                    compress=True
+                )
+            if crop_km is not None:
+                size_mb = os.path.getsize(_path) / 1e6
+                logger.info(
+                    f"traveltime inventory: {size_mb:.0f} MB with "
+                    f"{crop_km:.0f} km distance limit (mask={crop_mask})   ###"
+                )
 
             shutil.rmtree(self.traveltime_dir)
 
@@ -2356,18 +3377,13 @@ class InversionIterator(object):
         updating velocity models, event locations, and arrival residuals.
         """
 
-        hvr = self.cfg["algorithm"]["hvr"]
-        nvoronoi = self.cfg["algorithm"]["nvoronoi"]
-        kvoronoi_percent = self.cfg["algorithm"].get("kvoronoi",10)
-
-        alpha = self.cfg["algorithm"]["paretos_alpha"]
         nreal = self.cfg["algorithm"]["nreal"]
-        relocation_method = self.cfg["relocate"]["method"]
-        min_rays_per_cell = self.cfg["algorithm"]["min_rays_per_cell"]
 
-        adaptive_weight = self.cfg["algorithm"].get("adaptive_data_weight")
+        hvr = self.cfg["meshing"]["hvr"]
+        min_rays_per_cell = self.cfg["meshing"]["min_rays_per_cell"]
+        adaptive_weight = self.cfg["meshing"].get("adaptive_data_weight")
         adaptive_weight = max(0,min(adaptive_weight,1.0))
-        density_to_gradient_weight = self.cfg["algorithm"]["density_to_gradient_weight"]
+        density_to_gradient_weight = self.cfg["meshing"]["density_to_gradient_weight"]
         density_to_gradient_weight = max(0,min(density_to_gradient_weight,1.0))
 
         # ONLY doing the resolution test? (via -t flag)
@@ -2381,7 +3397,7 @@ class InversionIterator(object):
         except:
             phase_order =  ['P', 'S']
 
-        logger.info(f"Iteration #{self.iiter} (/{self.niter}) with hvr = {hvr}   ###")
+        logger.info(f"Iteration #{self.iiter} (/{self.niter}) ###")
 
         if self.cfg["argc"]["relocate_first"] == "False":
             self.sanitize_data()
@@ -2391,7 +3407,7 @@ class InversionIterator(object):
         if self.iiter == 1:
             self.save_stations() # save the first filtered station for sharing/etc
         
-        # determine if we will also compute a 1D velocity model on the last iteration
+        # Determine if we will also compute a 1D velocity model on the last iteration
         do_compute_1d = False
         if self.iiter == self.niter:
             do_compute_1d = self.cfg["model"].get("output_1d_model", True)
@@ -2399,12 +3415,11 @@ class InversionIterator(object):
         self.check_event_bounds()
 
         for phase in phase_order:
-            logger.info(f" >>> Starting {phase}-wave iteration {self.iiter}/{self.niter} <<<")
+            logger.info(f" >>> Starting {phase}-wave iteration {self.iiter} of {self.niter} <<<")
             if do_compute_1d:
                 logger.info("  * Also calculating 1D model on this iteration")
 
             self._reset_realization_stack(phase)
-       
             self._estimate_velocity_gradient_density(phase) # new! define vel gradients for adaptive meshing
 
             self._prev_conda = None # hold the previous iteration's damping estimate for the following
@@ -2413,26 +3428,37 @@ class InversionIterator(object):
                 logger.info(f"{phase} Realization # {self.ireal+1}/{nreal} | Iteration # {self.iiter}/{self.niter}")
                 self._sample_events()
                 self._sample_arrivals(phase)
+                t0 = time.perf_counter()
                 self._trace_rays(phase)
+                trace_rays_time = time.perf_counter() - t0
 
-                # Add some minor stochastic variability
-                mod_nvoronoi = int(nvoronoi*np.random.uniform(low=0.8, high=1.1)) # mostly dip lower but sometimes higher (TODO set in params?)
-                kvoronoi = int(mod_nvoronoi * kvoronoi_percent/100)
-                mod_kvoronoi = min(kvoronoi,int(mod_nvoronoi*0.6)) # sanity cap k's at 60% total n's
-
-                self._generate_voronoi_cells(phase,mod_kvoronoi,mod_nvoronoi,alpha,adaptive_weight,density_to_gradient_weight) # only takes a few sec usually
+                t0 = time.perf_counter()
+                self._generate_voronoi_cells(phase)
+                gen_voronoi_time = time.perf_counter() - t0
+                if trace_rays_time > 120:
+                    logger.info(f" Time elapsed: trace_rays {trace_rays_time/60:0.1f} min, generate_voronoi_cells {gen_voronoi_time:0.1f} s")
+                else: 
+                    logger.info(f" Time elapsed: trace_rays {trace_rays_time:0.1f} s, generate_voronoi_cells {gen_voronoi_time:0.1f} s") 
                 self._compute_sensitivity_matrix(phase,hvr)
+                self._diagnose_mesh(phase)
                 self._update_projection_matrix(phase,hvr)
                 self._compute_model_update(phase,min_rays=min_rays_per_cell,compute_1d=do_compute_1d)
+
+                # Adaptive early stopping (all ranks; decision broadcast)
+                if self._stack_converged(phase, nreal):
+                    break
 
             self.update_model(phase,compute_1d=do_compute_1d)
 
             if not self.argc.test_only:
-                self.save_model(phase, tag=f"h{hvr}")
+                self.save_model(phase, tag=None)
 
         self.compute_traveltime_lookup_tables() # without an argument, computes both phases
-        self.relocate_events(method=relocation_method) # also calls update_arrival_residuals, update_event_weights, and update_arrival_weights
+        self.relocate_events() # also calls update_arrival_residuals, update_event_weights, and update_arrival_weights
         self.track_residual_improvement() # track improvement of residuals and boot any gremlins TODO: can also be used to prematurely stop iterations?
+
+        if self.iiter >= self.cfg["analyze"].get("pick_start_iter", 3):
+            self.analyze_pick_residuals() # try to flag individual pick issues and write out to csv
 
         if self.iiter <= 3:
             self.check_event_migration() # implement a check to see if EQs have migrated a great deal (located very poorly to begin with!)
@@ -2600,15 +3626,19 @@ class InversionIterator(object):
             self.arrival_history = pd.DataFrame({
                 'arrival_id': self.arrivals['arrival_id'],
                 'event_id': self.arrivals['event_id'],
-                f'iter_{self.iiter}': self.arrivals['residual'].abs()
+                'network': self.arrivals['network'],
+                'station': self.arrivals['station'],
+                'phase': self.arrivals['phase'],
+                f'iter_{self.iiter}': self.arrivals['residual']
             })
 
             self.event_history = pd.DataFrame({
                 'event_id': self.events['event_id'],
-                f'iter_{self.iiter}': self.events['residual'].abs()
+                f'iter_{self.iiter}': self.events['residual']
             })
 
-            # Register the available phase types also just in case. Note this isn't necessarily what we're running though (TODO/review)
+            # Register the available phase types also just in case.
+            # Note this isn't necessarily the same as phase_order in the cfg!
             phases = self.arrivals["phase"]
             phases = phases.unique()
             self.phases = sorted(phases)
@@ -2662,9 +3692,6 @@ class InversionIterator(object):
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def purge_raypaths(self):
-        """
-        Destroys all stored raypaths
-        """
         logger.debug(f"Purging raypath directory: {self.raypath_dir}")
 
         shutil.rmtree(self.raypath_dir)
@@ -2673,18 +3700,13 @@ class InversionIterator(object):
 
 
     @_utilities.log_errors(logger)
-    def relocate_events(self, method="DE", weightsonly=False):
+    def relocate_events(self, weightsonly=False):
         """
-        Umbrella function to relocate via DE or LINEAR
+        Umbrella function to relocate via DE (or some other future method?)
         Also updates arrival residuals/weights, and event weights
         """
         if not weightsonly:
-            if method == "LINEAR":
-                self._relocate_events_linear()
-            elif method == "DE":
-                self._relocate_events_de()
-            else:
-                raise (ValueError("Relocation method must be either 'linear' or 'DE'"))
+            self._relocate_events_de()
 
         # After relocating events, update arrival residuals also
         self.update_arrival_residuals()
@@ -2700,138 +3722,16 @@ class InversionIterator(object):
 
 
     @_utilities.log_errors(logger)
-    def _relocate_events_linear(self, niter_linloc=1):
-        """
-        Relocate all events based on linear inversion and update the "events" attribute
-        """
-        raypath_dir = self.raypath_dir
-
-        if RANK == ROOT_RANK:
-            events = self.events.set_index("event_id")
-            events["idx"] = range(len(events))
-            arrivals = self.arrivals
-
-            logger.info(f"Relocating {len(events)} events with linear inversion")
-
-            for iter_loc in range(niter_linloc):
-                column_idxs = np.array([],dtype=int)
-                nonzero_values = np.array([],dtype=float)
-                nsegments = np.array([],dtype=int)
-                residuals = np.array([],dtype=float)
-
-                for phase in self.phases:
-                    if phase == "P":
-                        model = self.pwave_model
-                    elif phase == "S":
-                        model = self.swave_model
-
-                    arrivalssub = arrivals[arrivals["phase"]==phase]
-                    arrivalssub = arrivalssub.set_index(["network", "station"])
-                    idx_reloc = arrivalssub.index.unique()
-                    for network, station in idx_reloc:
-
-                        _arrivals = arrivalssub.loc[(network, station)]
-                        _arrivals = _arrivals.set_index("event_id")
-
-                        filename = f"{network}.{station}.{phase}.h5"
-                        path = os.path.join(raypath_dir, filename)
-                        if not os.path.isfile(path):
-                            continue
-
-                        with h5py.File(path, mode="r") as raypath_file:
-
-                            for event_id, arrival in _arrivals.iterrows():
-
-                                event = events.loc[event_id]
-                                idx = int(event["idx"])
-
-                                raypath = raypath_file[phase][:, idx]
-                                raypath = np.stack(raypath).T
-                                if (len(raypath)) < 7:
-                                    logger.info(f"skipping raypath for eid {event_id}, {phase}, {network}.{station}")
-                                    continue
-
-                                dpos = np.zeros(3,)
-                                dpos[0] = raypath[-2,0]-raypath[-1,0]
-                                dpos[1] = raypath[-1,0]*(raypath[-2,1]-raypath[-1,1])
-                                dpos[2] = raypath[-1,0]*(raypath[-2,2]-raypath[-1,2])*np.cos(raypath[-1,1])
-
-                                dpos = dpos/np.sqrt(np.sum(dpos**2))
-                                event_coords = events.loc[event_id, ["latitude", "longitude", "depth"]]
-                                event_coords = geo2sph(event_coords)
-                                vel_hypo = model.value(event_coords)
-                                dtdx = np.zeros(4,)
-                                dtdx[:-1] = dpos/vel_hypo # may be causing issue near ocean water boundaries
-                                dtdx[-1] = 1.0
-                                _column_idxs = np.arange(idx*4,idx*4+4)
-                                _nonnzero_values = dtdx
-
-                                column_idxs = np.append(column_idxs, _column_idxs)
-                                nonzero_values = np.append(nonzero_values,_nonnzero_values)
-                                nsegments = np.append(nsegments, len(_column_idxs))
-                                residuals = np.append(residuals, arrival["residual"])
-
-                row_idxs = [
-                    i for i in range(len(nsegments))
-                      for j in range(nsegments[i])
-                ]
-                row_idxs = np.array(row_idxs)
-
-                ncol = (events["idx"].max()+1)*4
-
-                Gmatrix = scipy.sparse.coo_matrix(
-                    (nonzero_values, (row_idxs, column_idxs)),
-                    shape=(len(nsegments), ncol)
-                )
-
-                # call lsmr for relocating
-                # add three more parameters into cfg file,
-                # "niter_linloc","damp_reloc" and "maxiter"
-                atol    = self.cfg["relocate"]["atol"]
-                btol    = self.cfg["relocate"]["btol"]
-                conlim  = self.cfg["relocate"]["conlim"]
-                damp    = self.cfg["relocate"]["damp"]
-                maxiter = self.cfg["relocate"]["maxiter"]
-
-                result = scipy.sparse.linalg.lsmr(
-                    Gmatrix,
-                    residuals,
-                    damp = damp,
-                    atol = atol,
-                    btol = btol,
-                    conlim = conlim,
-                    maxiter = maxiter,
-                    show=False
-                )
-                x, istop, itn, normr, normar, norma, conda, normx = result
-
-                # change radians to degrees
-                drad = x[::4]
-                dlat = x[1::4]*180.0/(np.pi*(_constants.EARTH_RADIUS-events["depth"]))
-                dlon = x[2::4]*180.0/(np.pi*(_constants.EARTH_RADIUS-events["depth"]))/np.cos(np.radians(events["latitude"]))
-                dorigin = x[3::4]
-
-                # update events
-                events["latitude"] = events["latitude"]+dlat
-                events["longitude"] = events["longitude"]-dlon
-                events["depth"] = events["depth"]+drad
-                events["time"] = events["time"]+dorigin
-            events = events.reset_index()
-            self.events = events
-
-        self.synchronize(attrs=["events"])
-        return True
-
-
-    @_utilities.log_errors(logger)
     def _relocate_events_de(self):
         """
-        Relocate all events via Differential Evolution and update the "events" attribute
+        Relocate all events via Differential Evolution (L1)
+        or Equal Differential Time (EDT) and update the "events" attribute
         """
 
         if RANK == ROOT_RANK:
             ids = self.events["event_id"]
-            logger.info("Relocating %d events via Differential Evolution" % len(ids))
+            method = self.cfg["relocation"]["method"]
+            logger.info("Relocating %d events via PyKonal-%s" % (len(ids),method.upper()) )
             self._dispatch(sorted(ids))
 
             logger.debug("Dispatch complete. Gathering events.")
@@ -2855,17 +3755,26 @@ class InversionIterator(object):
 
             with pykonal.locate.EQLocator(_path) as locator:
 
-                # Create some aliases for configuration-file parameters
-                depth_min = self.cfg["relocate"]["depth_min"]
-                dlat = self.cfg["relocate"]["dlat"]
-                dlon = self.cfg["relocate"]["dlon"]
-                dz = self.cfg["relocate"]["ddepth"]
-                dt = self.cfg["relocate"]["dtime"]
+                cfg         = self.cfg["relocation"]
+                method      = cfg["method"]
+                depth_min   = cfg["depth_min"]
+                dlat        = cfg["dlat"]
+                dlon        = cfg["dlon"]
+                dz          = cfg["ddepth"]
+                dt          = cfg["dtime"]
+                tt_error    = cfg["tt_error"]
+                pick_uncert = cfg["pick_uncert"]
+                truepick_error = cfg["truepick_error"]
+
+                # register station coordinates -> azimuthal gap etc. via
+                # locator.quality() become available; default pick error
+                # feeds the EDT pair variances
+                locator.add_stations(_station_dict)
+                locator.default_pick_error = pick_uncert
 
                 # Convert configuration-file parameters from geographic to spherical coordinates
                 rho_max = _constants.EARTH_RADIUS - depth_min
                 dtheta = np.radians(dlat)
-                #dphi = np.radians(dlon) 
                 dphi = np.radians(dlon) * np.cos(np.radians(self._model_lat_center)) # better scaled
                 delta = np.array([dz, dtheta, dphi, dt],dtype=_constants.DTYPE_REAL)
                 # slightly nonzero dlat and dlon for the quasi teleseisms.. within error anyway
@@ -2902,21 +3811,47 @@ class InversionIterator(object):
                     _arrivals = _utilities.arrival_dict(self.arrivals, event_id)
                     locator.add_arrivals(_arrivals)
 
-                    # Relocate the event
+                    # Per-pick uncertainties: truepicks get truepick_error
+                    # (near-zero -> they dominate the EDT likelihood)
+                    _pick_errors = _utilities.pick_error_dict(
+                        self.arrivals, event_id, pick_uncert, truepick_error
+                    )
+                    locator.add_pick_errors(_pick_errors)
+
+                    # Relocate. EDT needs >= 2 arrivals (pairwise
+                    # differential times); single-arrival "teleseisms"
+                    # fall back to the L1 objective.
                     try:
                         if len(_arrivals) == 1:
                             # Only let the teleseisms shift via time dimension since 1D (seems to be sensitive to the value. 1e-4 works)
-                            loc = locator.locate(initial, delta_tele)
+                            loc = locator.locate(initial, delta_tele, alpha=tt_error, method="l1")
                             logger.debug("locating TELESEISM")
                         else:
-                            loc = locator.locate(initial, delta)
+                            loc = locator.locate(initial, delta, alpha=tt_error, method=method)
 
                     except Exception as e:
                         logger.warning(f"Location failed for event {event_id}: {str(e)}")
                         raise
 
+                    # Cap at surface AND adjust OT? hmm..
+                    if 1 == 2:
+                        mdl = self.pwave_model # may be an issue if running S-only TODO
+                        rho_top = float(mdl.max_coords[0])          # surface
+                        rho_bot = float(mdl.min_coords[0])          # model bottom
+                        eps = 1e-3 * float(mdl.node_intervals[0])   # ~metres
+                        rho_clamped = min(max(loc[0], rho_bot + eps), rho_top - eps)
+                        if rho_clamped != loc[0]:
+                            loc[0] = rho_clamped
+                            try:
+                                t0 = locator.origin_time(loc[:3])   # re-derive origin time at pinned depth
+                                if t0 == t0:
+                                    loc[3] = t0
+                            except Exception:
+                                pass
+                    else: # or just cap depth to surface and move on as before (didn't seem to be a problem)
+                        loc[0] = min(loc[0], rho_max)
+                    
                     # Get residual RMS, reformat, append to relocated_events dataframe
-                    loc[0] = min(loc[0], rho_max) # cap the depths at the surface (hmm..)
                     rms = locator.rms(loc)
                     loc[:3] = sph2geo(loc[:3])
 
@@ -2940,8 +3875,7 @@ class InversionIterator(object):
     @_utilities.log_errors(logger)
     def sanitize_data(self, for_res_test=False):
         """
-        Clean up stations, events, and arrivals.
-        Also adds necessary extra keys etc.
+        Clean up stations, events, and arrivals. Also adds necessary extra keys etc.
         """
 
         if RANK == ROOT_RANK:
@@ -3073,13 +4007,12 @@ class InversionIterator(object):
                 if dn > 0:
                     logger.info(f"Dropped {dn} arrivals without associated events. {n0-dn} remain.   ###")
 
-            # Drop arrivals out of desired lateral range
+            # Drop events/arrivals out of desired lateral range
             arrivals   = self.arrivals
-            max_dist   = self.cfg["algorithm"]["max_dist"]
-            min_dist   = self.cfg["algorithm"]["min_dist"]
+            max_dist   = self.cfg["algorithm"]["max_dist"] # km, only 2D
+            min_dist   = self.cfg["algorithm"]["min_dist"] # this is the 3D distance effectively
             max_depth   = self.cfg["algorithm"]["max_depth"]
             min_depth   = self.cfg["algorithm"]["min_depth"]
-            cutoff_depth = self.cfg["algorithm"]["cutoff_depth"]
 
             # Merge event data (why is this needed?)
             events = self.events.rename(
@@ -3097,7 +4030,7 @@ class InversionIterator(object):
                 "event_depth",
                 "event_id"
             ]
-            arrivals = arrivals.merge(events[merge_columns], on="event_id")
+            arrivals = arrivals.merge(events[merge_columns], on="event_id", how='left')
 
             # Merge station data
             stations = self.stations.rename(
@@ -3115,26 +4048,32 @@ class InversionIterator(object):
                 "station"
             ]
             merge_keys = ["network", "station"]
-            arrivals = arrivals.merge(stations[merge_columns], on=merge_keys)
-
+            arrivals = arrivals.merge(stations[merge_columns], on=merge_keys, how='left')
 
             # Set arrivals distance (for use later, in sample_arrivals. do this once per iteration.)
-            dist = _utilities.dist_km(arrivals["event_latitude"],arrivals["event_longitude"],
-                                   arrivals["station_latitude"],arrivals["station_longitude"])
-            self.arrivals["delta"] = dist
+            epicentral = np.asarray(
+                _utilities.dist_km(arrivals["event_latitude"], arrivals["event_longitude"],
+                                   arrivals["station_latitude"], arrivals["station_longitude"]),
+                dtype=float)
+            depth = np.asarray(arrivals["event_depth"], dtype=float)
 
-            # Only select arrivals within desired distance bounds / NO! keep them for relocation. remove them only for inversion/meshing
-            """
-            idx_keep = arrivals[
-                ((arrivals['delta'] >= min_dist) & (arrivals['delta'] <= max_dist))
-            ].index
+            self.arrivals["delta"]      = epicentral
+            self.arrivals["slant_dist"] = np.sqrt(epicentral**2 + depth**2)
 
-            n0 = len(arrivals)
-            arrivals = arrivals.loc[idx_keep] # keep using the merged version for a sec
-            dn = n0 - len(arrivals)
+            # Remove any events outside of epicentral limit
+            n0 = len(self.arrivals)
+            keep_dist = (
+                (self.arrivals["slant_dist"] >= min_dist) &
+                (self.arrivals["delta"]      <= max_dist)
+            )
+            self.arrivals = self.arrivals[keep_dist].reset_index(drop=True)
+            dn = n0 - len(self.arrivals)
             if dn > 0:
-                logger.info(f"Dropped {dn} arrivals outside of requested lateral range. {n0-dn} remain.   ###")
-            """
+                logger.info(
+                    f"Distance filter: dropped {dn} arrivals outside "
+                    f"[min_dist={min_dist} km (slant), max_dist={max_dist} km "
+                    f"(epicentral)]. {len(self.arrivals)} remain.   ###"
+                )
 
             # Only select events within desired depth bounds
             idx_keep = self.events[
@@ -3153,7 +4092,7 @@ class InversionIterator(object):
             bool_idx = self.events["event_id"].isin(self.arrivals["event_id"])
             self.events = self.events[bool_idx]
             self.events0 = self.events.copy() # to track as the code progresses (only ROOT)
-            
+
             dn = n0 - len(self.events)
             if dn > 0:
                 logger.info(f"Dropped {dn} events without associated arrivals. {n0-dn} remain.   ###")
@@ -3293,6 +4232,52 @@ class InversionIterator(object):
             if len(self.arrivals) == 0:
                 logger.error("All arrivals were dropped!!")
 
+
+            # We have to do this here now also if we're going to track slant_dist
+            events = self.events.rename(columns={
+                "latitude": "event_latitude",
+                "longitude": "event_longitude",
+                "depth": "event_depth",
+            })
+            a = self.arrivals.merge(
+                events[["event_latitude", "event_longitude", "event_depth", "event_id"]],
+                on="event_id", how="left",
+            )
+            stations = self.stations.rename(columns={
+                "latitude": "station_latitude",
+                "longitude": "station_longitude",
+            })
+            a = a.merge(
+                stations[["station_latitude", "station_longitude", "network", "station"]],
+                on=["network", "station"], how="left",
+            )
+
+            epicentral = np.asarray(
+                _utilities.dist_km(a["event_latitude"], a["event_longitude"],
+                                   a["station_latitude"], a["station_longitude"]),
+                dtype=float)
+            depth = np.asarray(a["event_depth"], dtype=float)
+
+            self.arrivals["delta"] = epicentral
+            self.arrivals["slant_dist"] = np.sqrt(epicentral**2 + depth**2)
+
+            # And re-drop events (recently migrated?) outside of the epicentral/slant dist
+            _max_dist = self.cfg["algorithm"]["max_dist"]
+            _min_dist = self.cfg["algorithm"]["min_dist"]
+            n0 = len(self.arrivals)
+            self.arrivals = self.arrivals[
+                (self.arrivals["slant_dist"] >= _min_dist) &
+                (self.arrivals["delta"]      <= _max_dist)
+            ].reset_index(drop=True)
+            dn = n0 - len(self.arrivals)
+            if dn > 0:
+                logger.info(
+                    f"Distance filter: dropped {dn} arrivals outside "
+                    f"[min_dist={_min_dist} km (slant), max_dist={_max_dist} km "
+                    f"(epicentral)]. {len(self.arrivals)} remain.   ###"
+                )
+
+
         self.synchronize(attrs=["stations","events","arrivals"])
 
         return True
@@ -3421,7 +4406,6 @@ class InversionIterator(object):
             setattr(self, attr, value)
 
         COMM.barrier()
-
         return True
 
 
@@ -3508,6 +4492,11 @@ class InversionIterator(object):
                         coords = _events[["latitude", "longitude", "depth"]].values
                         coords = geo2sph(coords)
                         residuals = arrival_times - (origin_times + traveltime.resample(coords))
+                        truepick = (
+                            _arrivals["truepick"].values
+                            if "truepick" in _arrivals.columns
+                            else np.zeros(len(_arrivals), dtype=bool)
+                        )
                         _arrivals = dict(
                             network=network,
                             station=station,
@@ -3516,7 +4505,9 @@ class InversionIterator(object):
                             arrival_id=_arrivals["arrival_id"].values,
                             time=arrival_times,
                             residual=residuals,
-                            delta=delta
+                            delta=delta,
+                            slant_dist=_arrivals["slant_dist"].values,
+                            truepick=truepick
                         )
                         _arrivals = pd.DataFrame(_arrivals)
                         updated_arrivals = pd.concat([updated_arrivals, _arrivals])
@@ -3537,7 +4528,23 @@ class InversionIterator(object):
         if RANK == ROOT_RANK:
             # Get slowness and quality stacks
             stack = getattr(self, f"{phase}wave_realization_stack")
-            quality_stack = getattr(self, f"{phase}qual_realization_stack")
+            quality_stack = getattr(self, f"{phase}qual_realization_stack") # not really used (yet? ever?)
+
+            # Restrict to realizations actually computed (rows are NaN-
+            # filled at allocation; with adaptive early stopping the stack
+            # may hold fewer than algorithm.nreal). Masking also protects
+            # per-node NaNs within computed realizations.
+            raw = stack[...]
+            filled = ~np.all(
+                np.isnan(raw.reshape(raw.shape[0], -1)), axis=1
+            )
+            n_filled = int(filled.sum())
+            if n_filled < raw.shape[0]:
+                logger.info(
+                    f"update_model: stacking {n_filled} of "
+                    f"{raw.shape[0]} allocated realizations   ###"
+                )
+            stack = np.ma.masked_invalid(raw[filled])
 
             # Get our values. median is better than mean here, and allows for sharper features to be resolved
             variance = np.ma.var(stack,axis=0)
@@ -3550,38 +4557,23 @@ class InversionIterator(object):
             # Original v1 code was a pure median
 
             trim_fraction = self.cfg["algorithm"].get("stack_trim_percent", 0)
-            trim_fraction = np.clip(float(trim_fraction/100),0,0.9) # cap at 90%!
+            trim_fraction = np.clip(float(trim_fraction/100),0,0.485) # cap at 48.5%!
 
-            if trim_fraction > 0:
-                nreal = stack.shape[0]
-                n_trim = int(nreal * trim_fraction)
-
-                if n_trim > 0 and nreal > 2 * n_trim:
-                    sorted_stack = np.ma.sort(stack, axis=0)
-                    trimmed_stack = sorted_stack[n_trim:-n_trim, :, :, :]
-                else:
-                    # Not enough realizations to trim
-                    trimmed_stack = stack
+            if 1 == 1: # tried & tested mean/median (shared with the
+                # adaptive-stopping convergence metric via _stack_statistic)
+                delta_slowness = self._stack_statistic(stack)
             else:
-                trimmed_stack = stack
-
-            stack_type = self.cfg["algorithm"].get("stack_type", "mean")
-            if stack_type.lower() == 'median':
-                delta_slowness = np.ma.median(trimmed_stack, axis=0)
-            else:
-                delta_slowness = np.ma.mean(trimmed_stack, axis=0)
-
+                # exotic MODAL method.. not great tbh
+                #keep_fraction = 1 - 2*trim_fraction
+                delta_slowness = _utilities.stack_modal(stack,trim=trim_fraction)
 
             # Grab the model we are updating (which should be in velocity)
             model = getattr(self, f"{phase}wave_model")
-
 
             # Hold onto the original copy to restore certain very low velocity (oceans mostly?) areas
             orig_model = model.values.copy()
             watermask = model.values <= 0.2 # assume 0.2 km/s is water / TODO parameterize?
             wateridx = np.where(watermask)
-
-            # Apply velocity guardrails here? +/- 20% or something? TODO / probably unncessary
 
             if compute_1d:
                 ref_slowness_1d = np.nanmean(1.0 / model.values, axis=(1, 2))  # (nz,)
@@ -3589,9 +4581,9 @@ class InversionIterator(object):
             # Implement a bit of impedence in the early steps
             # so this limits model updates to step_frac of what they would have been
             if self.iiter <= 1:
-                step_frac = 0.75
+                step_frac = 0.80
             elif self.iiter <= 2 and self.niter > 2:
-                step_frac = 0.88
+                step_frac = 0.90
             elif self.iiter <= 3 and self.niter > 3:
                 step_frac = 0.95
             else:
@@ -3625,6 +4617,7 @@ class InversionIterator(object):
             if compute_1d:
                 stack_1d   = getattr(self, f"_{phase}wave_1d_stack")
                 stack_1d_ma = np.ma.masked_invalid(stack_1d)
+                stack_type = self.cfg["algorithm"].get("stack_type") 
 
                 # Same trim as 3D stack
                 if trim_fraction > 0:
@@ -3774,7 +4767,7 @@ class InversionIterator(object):
         self.synchronize(attrs=["events"])
 
         # Run process
-        for phase in self.phases:
+        for phase in self.cfg["algorithm"]["phase_order"]:
             self._run_resolution_test_single_phase(phase, horiz_block_size_km, amplitude)
         return True
 
@@ -3833,14 +4826,12 @@ class InversionIterator(object):
 
         # Run full inversion using same parameters as real inversion
         nreal = self.cfg["algorithm"]["nreal"]
-        nvoronoi = self.cfg["algorithm"]["nvoronoi"]
-        kvoronoi = int(nvoronoi * self.cfg["algorithm"]["kvoronoi"]/100)
-        alpha = self.cfg["algorithm"]["paretos_alpha"]
-        hvr = self.cfg["algorithm"]["hvr"]
-        min_rays_per_cell = self.cfg["algorithm"]["min_rays_per_cell"]
-        adaptive_weight = self.cfg["algorithm"]["adaptive_data_weight"]
+
+        hvr = self.cfg["meshing"]["hvr"]
+        min_rays_per_cell = self.cfg["meshing"]["min_rays_per_cell"]
+        adaptive_weight = self.cfg["meshing"]["adaptive_data_weight"]
         adaptive_weight = min(adaptive_weight,1.0)
-        density_to_gradient_weight = self.cfg["algorithm"]["density_to_gradient_weight"]
+        density_to_gradient_weight = self.cfg["meshing"]["density_to_gradient_weight"]
         density_to_gradient_weight = max(0,min(density_to_gradient_weight,1.0))        
 
         # Reset stack, define vel gradients, and run multiple realizations
@@ -3855,11 +4846,7 @@ class InversionIterator(object):
             self._sample_arrivals(phase,do_remove_outliers=False)
             self._trace_rays(phase)
 
-            # Add same stochastic variability to Voronoi cells
-            mod_nvoronoi = int(nvoronoi * np.random.uniform(low=0.70, high=1.15)) # mostly dip lower
-            mod_kvoronoi = min(kvoronoi, int(mod_nvoronoi * 0.7))
-
-            self._generate_voronoi_cells(phase,mod_kvoronoi,mod_nvoronoi,alpha,adaptive_weight,density_to_gradient_weight)
+            self._generate_voronoi_cells(phase)
             self._compute_sensitivity_matrix(phase,hvr)
             self._update_projection_matrix(phase,hvr)
             self._compute_model_update(phase,min_rays=min_rays_per_cell,use_weights=False) # don't apply weights for the resolution test

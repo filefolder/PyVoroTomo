@@ -1,3 +1,5 @@
+# note that as of v2.1 this whole module is dead code
+
 import numpy as np
 from scipy.spatial import cKDTree
 import pykonal

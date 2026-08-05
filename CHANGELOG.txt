@@ -1,3 +1,29 @@
+V2.1.1
+- Add option for Equal Differential Time (EDT) relocation method (via pykonal 0.5.4)
+- Add scheme to monitor improvement and break out of realizations loop early if stack not improving
+- Add option to read a set of "true" picks which are assumed to be perfect/0 uncertainty
+- Reduce calculating full model traveltimes; now only to 110% of max station distance
+- Bump minimum Pykonal to 0.5.4
+- Skip calculating traveltimes for stations without arrival data
+- Fix some bugs in NLL-PVT model conversion script
+- Add sanity checks in data IO
+- Add some scripts to illustrate meshing
+- Version bumps
+
+V2.1.0
+- BREAKING CHANGE: Significantly overhaul voronoi algorithm (see example.cfg)
+- BREAKING CHANGE: Reformat config sections
+- BREAKING CHANGE: Remove kvoronoi, alpha, et al. params. Change behavior of HVR
+- New scheme to calculate the proper L-curve to analytically find best damping (set damp = -1)
+- bump PyKonal to 0.5.1 which adds uncertainty to RMS calculation (also add these as config params)
+- limit PyKonal FMM traveltime search to within ~110% max traveltime
+- Cache df lookups & skip redundencies in trace_rays for significant speedups 
+- Completely remove LINEAR locator
+- Change behavior of min_dist- now a minimum distance in 3D
+- Adjust weighting scheme, add Cauchy method and remove linear
+- Modify NLL <-> PVT model conversion script to allow for interpolating to PVT models with non-cubic mesh 
+- Stop writing hvr to output model name
+
 V2.0.5
 - Reduce redundant work in trace_rays, projected_ray_idxs, compute_sensitivity_matrix
 - Add feature to remove raypaths that bottom between some depth range (ie moho depth)

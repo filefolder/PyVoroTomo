@@ -1,9 +1,13 @@
 import numpy as np
 import pandas as pd
 import pykonal
+import os
 
 from . import _constants
 from . import _picklabel
+from . import _utilities
+
+logger = _utilities.get_logger(f"__main__.{__name__}")
 
 def parse_event_data(cfg):
     """
@@ -26,6 +30,8 @@ def parse_event_data(cfg):
     """
 
     path = cfg["model"]["events_path"]
+    if not os.path.isfile(path):
+        raise RuntimeError(f'No catalog exists at {path}!')
 
     try:
         events   = pd.read_hdf(path, key="events")
@@ -59,7 +65,77 @@ def parse_event_data(cfg):
             )
             raise error
 
+    arrivals = flag_truepicks(cfg, arrivals)
+
     return events, arrivals
+
+
+def flag_truepicks(cfg, arrivals):
+    """
+    Add a boolean "truepick" column to the arrivals DataFrame.
+
+    If cfg["model"]["truepicks_path"] points to a CSV with columns
+    (event_id | eq_id), network, station, phase, the matching arrivals
+    are flagged True. These picks are treated as ground truth throughout
+    the inversion: exempt from outlier culling, always included in
+    arrival sampling, given maximum inversion weight, and assigned a
+    near-zero pick uncertainty during relocation.
+    """
+
+    arrivals = arrivals.copy()
+    arrivals["truepick"] = False
+
+    path = cfg["model"].get("truepicks_path", "")
+    if not path:
+        return arrivals
+
+    truepicks = pd.read_csv(path, skipinitialspace=True, comment="#")
+    truepicks.columns = [c.strip().lower() for c in truepicks.columns]
+    if "eq_id" in truepicks.columns and "event_id" not in truepicks.columns:
+        truepicks = truepicks.rename(columns={"eq_id": "event_id"})
+
+    required = ["event_id", "network", "station", "phase"]
+    missing = [c for c in required if c not in truepicks.columns]
+    if missing:
+        raise ValueError(
+            f"truepicks file '{path}' is missing columns {missing}; "
+            f"expected (event_id|eq_id), network, station, phase."
+        )
+
+    # Normalize for matching
+    truepicks = truepicks[required].copy()
+    truepicks["event_id"] = truepicks["event_id"].astype(
+        arrivals["event_id"].dtype
+    )
+    for col in ("network", "station", "phase"):
+        truepicks[col] = truepicks[col].astype(str).str.strip()
+        arrivals[col] = arrivals[col].astype(str).str.strip()
+    truepicks["phase"] = truepicks["phase"].str.upper()
+
+    truepicks = truepicks.drop_duplicates()
+
+    key_cols = ["event_id", "network", "station", "phase"]
+    arr_keys = pd.MultiIndex.from_frame(arrivals[key_cols])
+    true_keys = pd.MultiIndex.from_frame(truepicks[key_cols])
+    arrivals["truepick"] = arr_keys.isin(true_keys)
+
+    n_flagged = int(arrivals["truepick"].sum())
+    n_unmatched = int((~true_keys.isin(arr_keys)).sum())
+    logger.info(
+        f"truepicks: flagged {n_flagged} of {len(arrivals)} arrivals as "
+        f"ground truth ({len(truepicks)} rows in {path})   ###"
+    )
+    if n_unmatched > 0:
+        unmatched = truepicks[~true_keys.isin(arr_keys)]
+        logger.warning(
+            f"truepicks: {n_unmatched} rows matched NO arrival "
+            f"(check ids/codes). First few:\n"
+            f"{unmatched.head(5).to_string(index=False)}   ###"
+        )
+    if n_flagged == 0 and len(truepicks) > 0:
+        logger.warning("truepicks: file provided but nothing matched!   ###")
+
+    return arrivals
 
 # TODO rename this to "stations" ?
 def parse_network_geometry(cfg):
@@ -79,6 +155,8 @@ def parse_network_geometry(cfg):
     """
 
     path = cfg["model"]["stations_path"]
+    if not os.path.isfile(path):
+        raise RuntimeError(f'No stations exist at {path}!')
 
     network = pd.read_hdf(path, key="stations")
     network["depth"] = -network["elevation"] # TODO make this a bit more flexible
@@ -101,10 +179,29 @@ def parse_velocity_models(cfg):
 
 
     path = cfg["model"]["initial_pwave_path"]
-    _pwave_model = pykonal.fields.read_hdf(path)
+    if not os.path.isfile(path):
+        raise RuntimeError(f'No P model exists at {path}!')
+
+    try:
+        _pwave_model = pykonal.fields.read_hdf(path)
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not load P model file '{path}'"
+            f"Original error: {e}"
+        ) from e
 
     path = cfg["model"]["initial_swave_path"]
-    _swave_model = pykonal.fields.read_hdf(path)
+    if not os.path.isfile(path):    
+        raise RuntimeError(f'No S model exists at {path}!')
+
+    try:
+        _swave_model = pykonal.fields.read_hdf(path)
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not load S model file '{path}'"
+            f"Original error: {e}"
+        ) from e
+
 
     models  = pwave_model, swave_model
     _models = _pwave_model, _swave_model

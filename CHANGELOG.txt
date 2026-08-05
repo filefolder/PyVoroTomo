@@ -6,6 +6,7 @@ V2.1.1
 - Bump minimum Pykonal to 0.5.4
 - Skip calculating traveltimes for stations without arrival data
 - Fix some bugs in NLL-PVT model conversion script
+- Add composite event script (e.g. Lin et al. 2007)
 - Add sanity checks in data IO
 - Add some scripts to illustrate meshing
 - Version bumps

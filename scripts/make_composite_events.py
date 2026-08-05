@@ -16,6 +16,12 @@ average down pick noise. Events whose hypocentres fall within a small radius
 
 Merged-away events are discarded (no traceability kept, by design).
 
+See:
+    Lin, G., Shearer, P. M., Hauksson, E., & Thurber, C. H. (2007).
+    A three‐dimensional crustal seismic velocity model for southern California
+    from a composite event method.
+    Journal of Geophysical Research: Solid Earth, 112(B11).
+
 Clustering is greedy: seed on the highest-arrival-count unclaimed event, claim
 everything within `r_km` of it, repeat. This guarantees every cluster member is
 within `r_km` of its reference (no single-linkage chaining).
@@ -361,12 +367,15 @@ def analyze_outliers(outliers, top_n=30, min_events_systematic=3,
 
     return {"events": ev, "stations": st, "systematic": systematic}
 
+
 """
+
+example:
 
 events_comp, arrivals_comp = make_composite_events(events,arrivals,r_km=1.5,outlier_csv='composite_outliers.1.csv')
 analyze_outliers("composite_outliers.csv", top_n=50, csv_prefix="qc")
 
-out = 'wa.may.composite.1.h5'
+out = 'wa.composite.1.h5'
 events_comp.to_hdf(out,key='events',complevel=5,complib='zlib')
 arrivals_comp.to_hdf(out,key='arrivals',complevel=5,complib='zlib')
 

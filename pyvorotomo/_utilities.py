@@ -579,7 +579,15 @@ def arrival_dict(dataframe, event_id):
 
     dataframe = dataframe.set_index("event_id")
     fields = ["network", "station", "phase", "time"]
-    dataframe = dataframe.loc[event_id, fields]
+
+    try:
+        dataframe = dataframe.loc[event_id, fields]
+    except Exception as e:
+        logger = get_logger(f"__main__.{__name__}")
+        logger.warning(f"arrival_dict could not access event_id: {event_id}."
+            f"Error: {e}"
+            " This should not happen!!")
+        _arrival_dict = {}
 
     # If dataframe has only 1 item, it is converted to a Series
     #  this ensures it remains a DataFrame

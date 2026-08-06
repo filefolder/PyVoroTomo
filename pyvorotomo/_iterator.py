@@ -3243,10 +3243,10 @@ class InversionIterator(object):
             tt_observed = (
                 self.arrivals["time"] - self.arrivals["event_id"].map(event_time)
             )
-            max_tt_data = float(tt_observed.quantile(0.999)) # 99.9% just in case one wild pick in there
+            max_tt_data = float(tt_observed.quantile(0.99)) # 99% just in case some wild garbage in there
             max_tt = max_tt_data* 1.08 # 8% higher
             logger.info(
-                f"  max observed traveltime: {max_tt_data:.2f}s, solver tt cap at {max_tt:.1f}   ###"
+                f"  Max observed traveltime: {max_tt_data:.1f}s, solver tt cap at {max_tt:.1f}   ###"
             )
         else:
             max_tt = None
@@ -3266,13 +3266,14 @@ class InversionIterator(object):
         needed_by_phase = COMM.bcast(needed_by_phase, root=ROOT_RANK)
 
         if RANK == ROOT_RANK:
+            logger.info(f"  Building traveltimes here: {traveltime_dir}")
             skipped = all_geometry_ids - needed_any_phase
             if skipped:
                 logger.info(
-                    f"  skipping tt creation of {len(skipped)}/{len(all_geometry_ids)} stations "
+                    f"  ... but skipping {len(skipped)}/{len(all_geometry_ids)} stations "
                     f"with no post-QC arrivals in any phase   ###"
                 )
-            logger.info(f"  Building traveltimes here: {traveltime_dir}")
+
             os.makedirs(traveltime_dir, exist_ok=True)
             ids = sorted(needed_any_phase)
             self._dispatch(ids)
@@ -4097,6 +4098,16 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(f"Dropped {dn} events without associated arrivals. {n0-dn} remain.   ###")
 
+
+            # Drop arrivals without events
+            n0 = len(self.arrivals)
+            valid_event_ids = set(self.events["event_id"])
+            self.arrivals = self.arrivals[self.arrivals["event_id"].isin(valid_event_ids)]
+            dn = n0 - len(self.arrivals)
+            if dn > 0:
+                logger.info(f"Dropped {dn} arrivals without associated events. {n0-dn} remain.   ###")
+
+
             # Drop stations without arrivals.. then replant self.stations
             n0 = len(self.stations)
             arrivals = self.arrivals.set_index(["network", "station"])
@@ -4111,6 +4122,7 @@ class InversionIterator(object):
             if dn > 0:
                 logger.info(f"Dropped {dn} stations without associated arrivals. {n0-dn} remain.   ###")
 
+
             # Drop arrivals without stations.. then replant arrivals
             n0 = len(self.arrivals)
             stations = self.stations.set_index(["network", "station"])
@@ -4123,6 +4135,7 @@ class InversionIterator(object):
             dn = n0 - len(self.arrivals)
             if dn > 0:
                 logger.info(f"Dropped {dn} arrivals without associated stations. {n0-dn} remain.   ###")
+
 
             if len(self.stations) == 0:
                 logger.error("All stations were dropped!!")
@@ -4275,6 +4288,18 @@ class InversionIterator(object):
                     f"Distance filter: dropped {dn} arrivals outside "
                     f"[min_dist={_min_dist} km (slant), max_dist={_max_dist} km "
                     f"(epicentral)]. {len(self.arrivals)} remain.   ###"
+                )
+
+            # Distance filter may have orphaned events (all of their arrivals
+            # got dropped). Sweep once more before we sync.
+            n0 = len(self.events)
+            bool_idx = self.events["event_id"].isin(self.arrivals["event_id"])
+            self.events = self.events[bool_idx]
+            dn = n0 - len(self.events)
+            if dn > 0:
+                logger.info(
+                    f"Dropped {dn} events orphaned by distance filter. "
+                    f"{n0-dn} remain.   ###"
                 )
 
 

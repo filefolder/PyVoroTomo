@@ -3778,10 +3778,19 @@ class InversionIterator(object):
                 dtheta = np.radians(dlat)
                 dphi = np.radians(dlon) * np.cos(np.radians(self._model_lat_center)) # better scaled
                 delta = np.array([dz, dtheta, dphi, dt],dtype=_constants.DTYPE_REAL)
-                # slightly nonzero dlat and dlon for the quasi teleseisms.. within error anyway
-                #   if zero, pykonal can have a tantrum,
-                #     if too small then ||G|| zero. 1e-4 seems to work OK
-                delta_tele = np.array([.1,.0001,.0001,dt],dtype=_constants.DTYPE_REAL)
+
+                # the "synthetic" tele arrivals need some consideration.
+                # we can't let them move around too much. fix depth and probably dt, but let their pierce points adjust slightly?
+                # note also that we can't quite set anything to 0.0, otherwise ||G|| is zero and pykonal may have a small tantrum
+                delta_tele_max_deg = 0.01 # ~1 km horizontal pp movement per iteration?
+                delta_tele_dtheta = np.radians(delta_tele_max_deg)
+                delta_tele_dphi = delta_tele_dtheta * np.cos(np.radians(self._model_lat_center))
+                delta_tele_dz = 0.01 # km, essentially fixed
+                delta_tele_dt = 0.01 # s, ditto
+                delta_tele = np.array(
+                    [delta_tele_dz,delta_tele_dtheta,delta_tele_dphi,delta_tele_dt],
+                    dtype=_constants.DTYPE_REAL
+                    )
 
                 events = self.events
                 events = events.set_index("event_id")
@@ -3946,7 +3955,9 @@ class InversionIterator(object):
             idx_keep = events[ (minlon <= events['longitude'])
                              & (events['longitude']<= maxlon)
                              & (minlat <= events['latitude'])
-                             & (events['latitude']<= maxlat)].index
+                             & (events['latitude']<= maxlat)
+                             & (mindepth <= events['depth'])
+                             & (events['depth']<= maxdepth)].index
             self.events = events.loc[idx_keep]
             dn = n0 - len(self.events)
             if dn > 0:
@@ -3993,7 +4004,7 @@ class InversionIterator(object):
                 min_narrival = self.cfg["algorithm"]["min_narrival"]
                 n0 = len(self.events)
                 counts = self.arrivals["event_id"].value_counts()
-                counts = counts[(counts >= min_narrival) | (counts == 1)] # allow singular teleseisms-as-synthetic-events to remain
+                counts = counts[(counts >= min_narrival) | (counts == 1)] # allow singular teleseisms-as-synthetic-events to remain. somewhat dangerous if regular events get this low somehow
                 event_ids = counts.index
                 self.events = self.events[self.events["event_id"].isin(event_ids)]
                 dn = n0 - len(self.events)
@@ -4012,7 +4023,7 @@ class InversionIterator(object):
             arrivals   = self.arrivals
             max_dist   = self.cfg["algorithm"]["max_dist"] # km, only 2D
             min_dist   = self.cfg["algorithm"]["min_dist"] # this is the 3D distance effectively
-            max_depth   = self.cfg["algorithm"]["max_depth"]
+            max_depth   = self.cfg["algorithm"]["max_depth"] # note max_depth, min_depth are now user limit NOT model
             min_depth   = self.cfg["algorithm"]["min_depth"]
 
             # Merge event data (why is this needed?)

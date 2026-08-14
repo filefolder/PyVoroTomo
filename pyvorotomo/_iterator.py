@@ -67,7 +67,6 @@ class InversionIterator(object):
         self._squal_realization_stack = None
         self._gradient_magnitude = None
         self._grid_coords = None
-        self._prev_conda = None
         self._residuals = None
         self._residual_weights = None
         self._sensitivity_matrix = None
@@ -1650,6 +1649,76 @@ class InversionIterator(object):
         logger.info(f"    rays-per-cell 10%: {p10:.0f}, 25%: {p25:.0f}, 50%: {p50:.0f}, 75%: {p75:.0f}, 90%: {p90:.0f}")
 
 
+    # new! plot the first example mesh to build intuition
+    def _plot_mesh_slices(self, depths, label="mesh"):
+        """
+        Save bird's-eye (map-view) PNGs of the current Voronoi mesh
+        (self.voronoi_cells) at the given depths (km), with station and
+        depth-banded event overlays so mesh density reads against data coverage.
+        Grid points are colored by the cell they fall in, using the same
+        hvr-transformed nearest-cell assignment as the inversion. `label` (e.g.
+        the phase) only tags the filename/title. Root rank only.
+        """
+        if RANK != ROOT_RANK or self.voronoi_cells is None or not depths:
+            return
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        min_c, max_c = self.pwave_model.min_coords, self.pwave_model.max_coords
+        center = (min_c + max_c) / 2.0
+        hvr    = self.cfg["meshing"].get("hvr", 1.0)
+        scale  = np.array([1.0, hvr, hvr])
+        band   = self.cfg["meshing"].get("plot_mesh_event_band_km", 15.0) # width of slice to group events in (TODO add to util)
+        R      = _constants.EARTH_RADIUS
+
+        tree = cKDTree(sph2xyz(center + (self.voronoi_cells - center) / scale))
+        ng   = int(self.cfg["meshing"].get("plot_mesh_grid", 400))
+        TH, PH = np.meshgrid(np.linspace(min_c[1], max_c[1], ng),
+                             np.linspace(min_c[2], max_c[2], ng), indexing="ij")
+        grid = np.column_stack([np.empty(TH.size), TH.ravel(), PH.ravel()])
+        LON, LAT = np.degrees(PH), 90.0 - np.degrees(TH)
+        color = np.random.default_rng(0).permutation(len(self.voronoi_cells))
+
+        tag    = f"{label}_" if label else ""
+        outdir = self.cfg["model"]["output_dir"]
+        os.makedirs(outdir, exist_ok=True)
+        for z in depths:
+            r = R - z
+            if not (min_c[0] <= r <= max_c[0]):
+                logger.warning(f"  plot_mesh_slices: {z:g} km (r={r:.1f}) outside model "
+                               f"radial range [{min_c[0]:.1f}, {max_c[0]:.1f}] — skipped   ###")
+                continue
+            grid[:, 0] = r
+            _, idx = tree.query(sph2xyz(center + (grid - center) / scale))
+
+            fig, ax = plt.subplots(figsize=(7, 6))
+            ax.pcolormesh(LON, LAT, color[idx].reshape(TH.shape),
+                          cmap="tab20", shading="auto")
+            try:                                    # events near this depth
+                near = self.events[np.abs(self.events["depth"] - z) <= band]
+                ax.scatter(near["longitude"], near["latitude"], s=9, c="red",
+                           edgecolors="k", linewidths=0.2,
+                           label=f"events |dz|<={band:g}km ({len(near)})")
+            except Exception:
+                pass
+            try:                                    # stations (surface reference)
+                st = self.stations
+                ax.scatter(st["longitude"], st["latitude"], marker="^", s=34,
+                           c="k", edgecolors="w", linewidths=0.5,
+                           label=f"stations ({len(st)})")
+            except Exception:
+                pass
+            ax.set_aspect(1.0 / np.cos(np.radians(LAT.mean())))
+            ax.set_xlabel("longitude"); ax.set_ylabel("latitude")
+            ax.legend(loc="upper right", fontsize=7, framealpha=0.9)
+            ax.set_title(f"{label} Voronoi mesh — {z:g} km depth "
+                         f"({len(self.voronoi_cells)} cells, hvr={hvr:g})")
+            fpath = os.path.join(outdir, f"mesh_slice_{tag}{z:g}km.png")
+            fig.savefig(fpath, dpi=130, bbox_inches="tight"); plt.close(fig)
+            logger.info(f"  wrote {fpath}   ###")
+
+
     def _estimate_data_density(self, phase, adaptive_weight):
         """
         Estimate data density based on arrival counts in model coordinate system
@@ -2164,14 +2233,14 @@ class InversionIterator(object):
                     rest = arrivals[~arrivals["truepick"]]
                     n_rest = max(narrival - len(true_arrivals), 0)
                     if n_rest > 0 and n_rest < len(rest):
-                        rest = rest.sample(n=n_rest, weights="weight")
+                        rest = _utilities.sample_weighted(rest, n_rest, "weight")
                     arrivals = pd.concat([true_arrivals, rest])
                     logger.debug(
                         f"sampled_arrivals: {len(true_arrivals)} truepicks "
                         f"force-included + {len(rest)} sampled   ###"
                     )
                 else:
-                    arrivals = arrivals.sample(n=narrival, weights="weight")
+                    arrivals = _utilities.sample_weighted(arrivals, narrival, "weight")
 
             self.sampled_arrivals = arrivals
 
@@ -2206,7 +2275,7 @@ class InversionIterator(object):
                 if 'weight' not in events.columns:
                     events['weight'] = 1.0
                     logger.warning("events['weight'] column missing in sample_events??   ###")
-                events = events.sample(n=nevent, weights='weight')
+                events =  _utilities.sample_weighted(events, nevent, "weight")
 
             self.sampled_events = events
 
@@ -2885,8 +2954,7 @@ class InversionIterator(object):
         """
         Update events weights using KDE for homogeneous raypath sampling
 
-        Args:
-            npts: Number of points for KDE grid evaluation (16 is fine)
+        npts is the number of points for KDE grid evaluation (16 is fine)
         """
         logger.info("Updating event KDE weights for raypath sampling   ###")
 
@@ -2937,49 +3005,27 @@ class InversionIterator(object):
                 # Compute densities at data points
                 densities = interpolator(data_normalized)
 
-                if self.iiter < 2:
-                    # Strong inverse weighting
-                    weights = 1.0 / densities
-                elif self.iiter < 4:
-                    # Transition to exp-based weighting
-                    weights = 1.0 / np.exp(densities)
-                else:
-                    # Taper from density-weighted to uniform over remaining iterations
-                    progress = (self.iiter - 4) / (self.niter - 4)  # 0 at iter 4, 1 at final iter
-                    progress = min(progress, 1.0)
-                    density_weight = 1.0 / np.exp(densities)
-                    uniform_weight = np.ones_like(densities)
-                    weights = (1 - progress) * density_weight + progress * uniform_weight
+                # Favor events in sparse (low-density) regions, strongly at first and
+                # relaxing to uniform as the inversion converges. exp(-beta*d) is bounded
+                # (no 1/density blow-up), and beta tapers to 0 by the final iteration.
+                valid = np.isfinite(densities) & (densities > 0)
+                d = densities / np.median(densities[valid])          # scale-free (median -> 1)
+                beta = self.cfg["algorithm"].get("weight_strength", 1.0)
+                beta *= max(0.0, 1.0 - self.iiter / max(self.niter - 1, 1))
+                weights = np.exp(-beta * d)
 
-                # Clip to 95th percentile to prevent outlier events dominating
-                weight_cap = np.percentile(weights[np.isfinite(weights)], 95)
-
-                # Monitor how weights are being capped
-                uncapped_max = weights[np.isfinite(weights)].max()
-                cap_ratio = uncapped_max / weight_cap  # how much the highest weight exceeds the cap
-                if cap_ratio > 5.0:
-                    logger.info(f"  95th percentile weight cap={weight_cap:.2f}, max_uncapped={uncapped_max:.2f} ({cap_ratio:.1f}x cap)   ###")
-
-                # Cap & Normalise
-                weights = np.minimum(weights, weight_cap)
-
-                # Ground-truth picks always carry the maximum weight so
-                # they are preferentially drawn in every realization /// NOT IN EVENTS KDE!!
-                #if "truepick" in arrivals.columns:
-                #    is_true = arrivals["truepick"].fillna(False).astype(bool).values
-                #    if is_true.any():
-                #        weights[is_true] = weight_cap
+                # Normalize
                 weight_sum = weights.sum()
                 if weight_sum > 0:
                     weights = weights / weight_sum
                 else:
-                    logger.warning(f"  KDE event weights sum to zero for (!), using uniform weights   ###")
+                    logger.warning("  KDE event weights sum to zero (!), using uniform weights   ###")
                     weights = np.ones(len(weights)) / len(weights)
 
                 # Set any problem infinite or NaN values to 0
                 bad_values = ~np.isfinite(weights)
                 if np.any(bad_values):
-                    logger.warning(f"Found {np.sum(bad_values)} infinite/NaN in KDE event weights, setting to 0   ###")
+                    logger.warning(f"Found {np.sum(bad_values)} infinite/NaN in KDE event weights (!!) setting to 0   ###")
                 weights[bad_values] = 0
 
                 # Set em!
@@ -3021,9 +3067,7 @@ class InversionIterator(object):
         """
         Update arrival weights using KDE for homogeneous raypath sampling
 
-        Args:
-            phase: Phase type to process
-            npts: Number of points for KDE grid evaluation (default 16)
+        npts is the number of points for KDE grid evaluation (16 is fine)
         """
         logger.info(f"Updating {phase} arrival KDE weights for raypath sampling")
 
@@ -3105,28 +3149,21 @@ class InversionIterator(object):
                 )
                 densities = interpolator(data_normalized)
 
-                # For arrivals, just use the same weight scheme the whole time
-                weights = 1 / np.exp(densities)
+                # For arrivals, favor picks in sparse (low-density) regions with the
+                # same bounded scheme, held constant across iterations.
+                valid = np.isfinite(densities) & (densities > 0)
+                d = densities / np.median(densities[valid])          # scale-free (median -> 1)
+                beta = self.cfg["algorithm"].get("weight_strength", 1.0)
+                weights = np.exp(-beta * d)
 
-                # Clip to 95th percentile to prevent outlier arrivals dominating
-                weight_cap = np.percentile(weights[np.isfinite(weights)], 95)
-
-                # Monitor how weights are being capped
-                uncapped_max = weights[np.isfinite(weights)].max()
-                cap_ratio = uncapped_max / weight_cap  # how much the highest weight exceeds the cap
-                if cap_ratio > 2.0:
-                    logger.info(f"  95th percentile weight cap={weight_cap:.2f}, max_uncapped={uncapped_max:.2f} ({cap_ratio:.1f}x cap)   ###")
-
-                # Cap & Normalise
-                weights = np.minimum(weights, weight_cap)
-
-                # Ground-truth picks always carry the maximum weight so
-                # they are preferentially drawn in every realization
+                # Ground-truth picks always carry the maximum weight
                 if "truepick" in arrivals.columns:
                     is_true = arrivals["truepick"].fillna(False).astype(bool).values
                     if is_true.any():
-                        weights[is_true] = weight_cap
+                        weights[is_true] = weights.max()
 
+                # Normalize (bounded weights -> no outlier cap; without-replacement
+                # feasibility is enforced at sample time)
                 weight_sum = weights.sum()
                 if weight_sum > 0:
                     weights = weights / weight_sum
@@ -3137,7 +3174,7 @@ class InversionIterator(object):
                 # Set any infinite or NaN values to 0
                 bad_values = ~np.isfinite(weights)
                 if np.any(bad_values):
-                    logger.warning(f"Found {np.sum(bad_values)} infinite/NaN in KDE arrival weights, setting to 0   ###")
+                    logger.warning(f"Found {np.sum(bad_values)} infinite/NaN in KDE arrival weights (!!) setting to 0   ###")
                 weights[bad_values] = 0
 
                 # Set em!
@@ -3423,8 +3460,6 @@ class InversionIterator(object):
             self._reset_realization_stack(phase)
             self._estimate_velocity_gradient_density(phase) # new! define vel gradients for adaptive meshing
 
-            self._prev_conda = None # hold the previous iteration's damping estimate for the following
-
             for self.ireal in range(nreal):
                 logger.info(f"{phase} Realization # {self.ireal+1}/{nreal} | Iteration # {self.iiter}/{self.niter}")
                 self._sample_events()
@@ -3435,6 +3470,12 @@ class InversionIterator(object):
 
                 t0 = time.perf_counter()
                 self._generate_voronoi_cells(phase)
+
+                # plot the mesh for the first realization of the first iteration only
+                if self.iiter == 1 and self.ireal == 1:
+                    if self.cfg["meshing"].get("plot_mesh_slices"):
+                        self._plot_mesh_slices(self.cfg["meshing"]["plot_mesh_slices"], label=phase)
+
                 gen_voronoi_time = time.perf_counter() - t0
                 if trace_rays_time > 120:
                     logger.info(f" Time elapsed: trace_rays {trace_rays_time/60:0.1f} min, generate_voronoi_cells {gen_voronoi_time:0.1f} s")
@@ -3779,14 +3820,15 @@ class InversionIterator(object):
                 dphi = np.radians(dlon) * np.cos(np.radians(self._model_lat_center)) # better scaled
                 delta = np.array([dz, dtheta, dphi, dt],dtype=_constants.DTYPE_REAL)
 
-                # the "synthetic" tele arrivals need some consideration.
-                # we can't let them move around too much. fix depth and probably dt, but let their pierce points adjust slightly?
-                # note also that we can't quite set anything to 0.0, otherwise ||G|| is zero and pykonal may have a small tantrum
-                delta_tele_max_deg = 0.01 # ~1 km horizontal pp movement per iteration?
+                # the "synthetic" tele arrivals need some special consideration.
+                # we can't let them move around too much. depth and dt should be clamped, but possibly allow some
+                # pierce point wiggle. we are going to rely on the weighting scheme primarily.
+                # note also that we can't quite set anything to 0.0, otherwise ||G|| is zero and pykonal (used to?) get upset about this
+                delta_tele_max_deg = 0.002 # +/- 0.2 km horizontal piercepoint migration per iteration?
                 delta_tele_dtheta = np.radians(delta_tele_max_deg)
                 delta_tele_dphi = delta_tele_dtheta * np.cos(np.radians(self._model_lat_center))
-                delta_tele_dz = 0.01 # km, essentially fixed
-                delta_tele_dt = 0.01 # s, ditto
+                delta_tele_dz = 0.0001 # km, essentially clamped
+                delta_tele_dt = 0.0001 # sec, ditto
                 delta_tele = np.array(
                     [delta_tele_dz,delta_tele_dtheta,delta_tele_dphi,delta_tele_dt],
                     dtype=_constants.DTYPE_REAL
@@ -3828,12 +3870,10 @@ class InversionIterator(object):
                     )
                     locator.add_pick_errors(_pick_errors)
 
-                    # Relocate. EDT needs >= 2 arrivals (pairwise
-                    # differential times); single-arrival "teleseisms"
-                    # fall back to the L1 objective.
+                    # EDT needs >= 2 arrivals (pairwise differential times)
+                    # single-arrival "teleseisms" fall back to the L1 objective.
                     try:
                         if len(_arrivals) == 1:
-                            # Only let the teleseisms shift via time dimension since 1D (seems to be sensitive to the value. 1e-4 works)
                             loc = locator.locate(initial, delta_tele, alpha=tt_error, method="l1")
                             logger.debug("locating TELESEISM")
                         else:

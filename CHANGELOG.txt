@@ -1,3 +1,9 @@
+V2.1.2
+- Simplify KDE weighting scheme dramatically (solves pandas v3 issue)
+- Add some scripts to illustrate meshing / features to plot meshing on 1st realization
+- Add feature to auto-merge separate event catalogs in the run config
+- pykonal version bump to 0.5.5 which fixes L1 solver issue with teleseisms
+
 V2.1.1
 - Add option for Equal Differential Time (EDT) relocation method (via pykonal 0.5.4)
 - Add scheme to monitor improvement and break out of realizations loop early if stack not improving
@@ -8,7 +14,6 @@ V2.1.1
 - Fix some bugs in NLL-PVT model conversion script
 - Add composite event script (e.g. Lin et al. 2007)
 - Add sanity checks in data IO
-- Add some scripts to illustrate meshing
 - Version bumps
 
 V2.1.0

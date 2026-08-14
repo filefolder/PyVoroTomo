@@ -148,12 +148,9 @@ def root_only(rank, default=True, barrier=True):
 class ArgumentParser(argparse.ArgumentParser):
     """ A simple subclass to abort all threads if argument parsing fails """
     def exit(self, status=0, message=None):
-
         self.print_usage()
-
         if message is not None:
             print(message)
-
         abort()
 
 
@@ -161,7 +158,6 @@ def parse_args():
     """Parse and return command line arguments"""
 
     parser = ArgumentParser()
-
     parser.add_argument(
         "-c",
         "--configuration_file",
@@ -193,17 +189,9 @@ def parse_args():
         action="store_true",
         help="Save realizations to disk."
     )
-
     args = parser.parse_args()
 
-    for attr in (
-        #"events",
-        #"network",
-        #"log_file"
-        #"output_dir"
-        "configuration_file",):
-
-
+    for attr in ("configuration_file",):
         _attr = getattr(args, attr)
         _attr = os.path.abspath(_attr)
         setattr(args, attr, _attr)
@@ -226,8 +214,8 @@ def parse_cfg(configuration_file):
     _cfg["phase_order"] = [str(v).upper() for v in parser.get("algorithm", "phase_order", fallback='P,S').split(",")]
     _cfg["min_dist"] = parser.getfloat("algorithm", "min_dist", fallback=1)
     _cfg["max_dist"] = parser.getfloat("algorithm", "max_dist", fallback=155)
-    raypath_bottom_mask_string = parser.get("algorithm", "raypath_bottom_mask", fallback="-1,-1")
-    _cfg["raypath_bottom_mask"] = [float(x.strip()) for x in raypath_bottom_mask_string.split(",")]
+    raw = parser.get("algorithm", "raypath_bottom_mask", fallback="-1,-1")
+    _cfg["raypath_bottom_mask"] = [float(x.strip()) for x in raw.split(",")]
     _cfg["nreal"] = parser.getint("algorithm", "nreal")
     _cfg["min_narrival"] = parser.getint("algorithm", "min_narrival", fallback=9)
     _cfg["narrival"] = parser.getint("algorithm", "narrival")
@@ -292,6 +280,8 @@ def parse_cfg(configuration_file):
     _cfg["max_cell_width_km"] = parser.getfloat("meshing", "max_cell_width_km", fallback=150)
     _cfg["enable_backfill"] = parser.getboolean("meshing", "enable_backfill", fallback=True)
     _cfg["min_rays_per_cell"] = parser.getint("meshing", "min_rays_per_cell", fallback=10)
+    raw = parser.get("meshing", "plot_mesh_slices", fallback="").strip()
+    _cfg["plot_mesh_slices"] = [float(z) for z in raw.split(",") if z.strip()]
     cfg["meshing"] = _cfg
 
     # ANALYZE section
@@ -326,6 +316,7 @@ def parse_cfg(configuration_file):
     scratch_dir = parser.get("model", "scratch_dir", fallback=os.path.join(output_dir, "scratch"))
     scratch_dir = os.path.abspath(scratch_dir)
     _cfg["scratch_dir"] = scratch_dir
+    _cfg["keep_scratch"] = parser.getboolean("model", "keep_scratch", fallback=False) # TODO add option to auto-remove scratch dir
 
     if RANK == _constants.ROOT_RANK:
         os.makedirs(output_dir, exist_ok=True)
@@ -335,8 +326,12 @@ def parse_cfg(configuration_file):
     stations_path = os.path.abspath(stations_path)
     _cfg["stations_path"] = stations_path
 
-    events_path = parser.get("model", "events_path")
-    events_path = os.path.abspath(events_path)
+    events_path = parser.get("model", "events_path") # one path or optionally a csv list of many
+    events_path = ",".join(
+        os.path.abspath(p.strip())
+        for p in events_path.split(",")
+        if p.strip()
+    )
     _cfg["events_path"] = events_path
 
     initial_pwave_path = parser.get("model", "initial_pwave_path")
@@ -360,8 +355,8 @@ def parse_cfg(configuration_file):
     res_test_string = parser.get("model", "res_test_size_mag", fallback='100,0.08')
     _cfg["res_test_size_mag"] = [float(x.strip()) for x in res_test_string.split(",")]
  
-    res_test_layers_string = parser.get("model", "res_test_layers", fallback="10,25,50,70,120,170,230")
-    _cfg["res_test_layers"] = [float(x.strip()) for x in res_test_layers_string.split(",")]
+    raw = parser.get("model", "res_test_layers", fallback="10,25,50,70,120,170,230")
+    _cfg["res_test_layers"] = [float(x.strip()) for x in raw.split(",")]
     rerun_restest = parser.get("model", "rerun_restest", fallback='')
     if rerun_restest.strip():
         _cfg["rerun_restest"] = os.path.abspath(rerun_restest)
@@ -389,7 +384,6 @@ def parse_cfg(configuration_file):
     return cfg
 
 
-
 def write_cfg(argc, cfg):
     """
     Write the execution configuration to disk for later reference.
@@ -415,17 +409,14 @@ def dist_deg(lat1, lon1, lat2, lon2):
     Vectorized calculation of spherical distance in DEGREES.
     Works with both single values and arrays.
     """
-    # Convert inputs to arrays for vectorization
+    # Convert inputs to arrays for vectorization, then to radians
     lat1, lon1, lat2, lon2 = map(np.asarray, (lat1, lon1, lat2, lon2))
-
-    # Convert to radians
     phi1 = lat1 * _constants.DEG_TO_RAD
     phi2 = lat2 * _constants.DEG_TO_RAD
 
     # Pre-compute trigonometric functions
     cos_phi1 = np.cos(phi1)
     cos_phi2 = np.cos(phi2)
-
     dlon = (lon2 - lon1) * _constants.DEG_TO_RAD
     dlat = (lat2 - lat1) * _constants.DEG_TO_RAD
 
@@ -446,9 +437,8 @@ def dist_km(lat1, lon1, lat2, lon2):
     Vectorized calculation of distance in KILOMETERS.
     Works with both single values and arrays.
     """
+    # Convert inputs to arrays for vectorization, then to radians    
     lat1, lon1, lat2, lon2 = map(np.asarray, (lat1, lon1, lat2, lon2))
-
-    # Convert to radians
     phi1 = lat1 * _constants.DEG_TO_RAD
     phi2 = lat2 * _constants.DEG_TO_RAD
 
@@ -473,7 +463,7 @@ def dist_km(lat1, lon1, lat2, lon2):
 def remove_outliers(dataframe, tukey_k, column, max_resid=None):
     """
     Return DataFrame with outliers removed using Tukey fences.
-    ALSO remove any arrival or event beyond maxresid (first)
+    ALSO remove any arrival or event beyond max_resid (first)
     Note that "column" is always "residual" in our case
 
     Rows flagged truepick=True are NEVER removed: they are protected from
@@ -666,14 +656,34 @@ def compute_residual_weights(residuals, method="huber", scale=None, tuning_param
 
 def blend_weights(weights, blend_factor):
     """
-    Args:
-        weights: weights from compute_residual_weights
-        blend_factor: 0 = uniform weights, 1 = full weighting
+    weights: weights from compute_residual_weights
+    blend_factor: 0 = uniform weights, 1 = full weighting
 
     Returns blended weights from 0 to 1
     """
     blend_factor = np.clip(blend_factor, 0.0, 1.0)
     return (1 - blend_factor) + blend_factor * weights
+
+# pandas 3+ is now strict about weights. this function replaces 'sample' so it won't crash
+# in instances the weights are too distorted (mostly too high in places)
+def sample_weighted(frame, n, weight_col="weight"):
+    """
+    Weighted sample of `n` rows WITHOUT replacement, OK for pandas>=3.
+
+    pandas rejects the draw unless max(w) <= sum(w)/n. Clipping at the n-th
+    largest weight enforces exactly that in one step: it puts at least n
+    weights at the cap, so sum >= n*max. Non-finite/negative weights are
+    treated as zero; if fewer than n rows carry a positive weight it falls
+    back to a uniform draw. Never raises for n < len(frame).
+    """
+    if n >= len(frame):
+        return frame
+    w = pd.to_numeric(frame[weight_col], errors="coerce").to_numpy(float)
+    w = np.where(np.isfinite(w) & (w > 0.0), w, 0.0)
+    if (w > 0).sum() < n:                                   # too few usable -> uniform
+        return frame.sample(n=n)
+    t = np.partition(w, len(w) - n)[len(w) - n]             # n-th largest weight
+    return frame.sample(n=n, weights=np.minimum(w, t))
 
 
 # not used 

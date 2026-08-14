@@ -9,7 +9,7 @@ from . import _utilities
 
 logger = _utilities.get_logger(f"__main__.{__name__}")
 
-def parse_event_data(cfg):
+def parse_event_data_old(cfg):
     """
     Parse and return event data (origins and phases) specified in the
     config file.
@@ -31,7 +31,7 @@ def parse_event_data(cfg):
 
     path = cfg["model"]["events_path"]
     if not os.path.isfile(path):
-        raise RuntimeError(f'No catalog exists at {path}!')
+        raise RuntimeError(f'No catalog(s) exists at {path}!')
 
     try:
         events   = pd.read_hdf(path, key="events")
@@ -68,6 +68,116 @@ def parse_event_data(cfg):
     arrivals = flag_truepicks(cfg, arrivals)
 
     return events, arrivals
+
+ 
+def parse_event_data(cfg):
+    """
+    Parse and return event data (origins and phases) specified in the
+    config file.
+
+    Data are returned as a two-tuple of pandas.DataFrame objects. The
+    first entry is the origin data and the second is the phase data.
+
+    Each input file is expected to be a HDF5 file readable using
+    pandas.HDFStore. The input file should have two tables: "events"
+    and "arrivals".
+
+    The "events" table needs to have "latitude",
+    "longitude", "depth", "time", "event_id", and "source_id" columns.
+    If source_id is not present, we make a generic one.
+
+    The "arrivals" table needs to have "network", "station", "phase",
+    "time", and "event_id" columns.
+
+    Multiple catalogs may be combined by giving a comma-separated list of
+    paths in cfg["model"]["events_path"] (e.g. "cat_a.h5, cat_b.h5").
+    """
+
+    raw = cfg["model"]["events_path"]
+    paths = [p.strip() for p in str(raw).split(",") if p.strip()]
+    if not paths:
+        raise RuntimeError("No events_path specified in config!")
+
+    events_frames   = []
+    arrivals_frames = []
+    event_id_offset   = 0
+    arrival_id_offset = 0
+
+    for path in paths:
+        if not os.path.isfile(path):
+            raise RuntimeError(f'No catalog exists at {path}!')
+
+        try:
+            events   = pd.read_hdf(path, key="events")
+            arrivals = pd.read_hdf(path, key="arrivals")
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not load event file '{path}'. "
+                f"This may be due to an incompatible version of PyTables. "
+                f"Original error: {e}"
+            ) from e
+
+        if 'arrival_id' not in arrivals.keys():
+            arrivals['arrival_id'] = range(len(arrivals))
+
+        # Validate required fields per file. source_id is excluded here
+        # because it is generated (if absent) after the merge, below.
+        for field in _constants.EVENT_FIELDS:
+            if field == "source_id":
+                continue
+            if field not in events.columns:
+                raise ValueError(
+                    f"Input event data in '{path}' must have the following "
+                    f"fields: {_constants.EVENT_FIELDS}"
+                )
+
+        for field in _constants.ARRIVAL_FIELDS:
+            if field not in arrivals.columns:
+                raise ValueError(
+                    f"Input arrival data in '{path}' must have the following "
+                    f"fields: {_constants.ARRIVAL_FIELDS}"
+                )
+
+        # Offset ids so they do not collide across files. The first file
+        # keeps its ids (offset == 0)
+        if event_id_offset:
+            events["event_id"]   = events["event_id"]   + event_id_offset
+            arrivals["event_id"] = arrivals["event_id"] + event_id_offset
+        if arrival_id_offset:
+            arrivals["arrival_id"] = arrivals["arrival_id"] + arrival_id_offset
+
+        # Advance the running offsets for the next file.
+        if len(events):
+            event_id_offset = int(events["event_id"].max()) + 1
+        if len(arrivals):
+            arrival_id_offset = int(arrivals["arrival_id"].max()) + 1
+
+        events_frames.append(events)
+        arrivals_frames.append(arrivals)
+
+    events   = pd.concat(events_frames, ignore_index=True)
+    arrivals = pd.concat(arrivals_frames, ignore_index=True)
+
+    # Generate any missing source_id AFTER merging.
+    # Real source_ids from the inputs are preserved; only
+    # absent/blank ones are filled. Because event_id is globally unique by
+    # now, the generated ids are unique too, and for a single catalog they
+    # match the original "event_%06d" values exactly.
+    # There could be a problem if catalogs with overlapping event_ids are merged/TODO
+    if 'source_id' not in events.columns:
+        events['source_id'] = pd.NA
+    blank = events['source_id'].isna() | (
+        events['source_id'].astype("string").str.strip() == ""
+    )
+    if blank.any():
+        events.loc[blank, 'source_id'] = (
+            "event_" + events.loc[blank, 'event_id'].astype(str).str.zfill(6)
+        )
+
+    arrivals = flag_truepicks(cfg, arrivals)
+
+    return events, arrivals
+
 
 
 def flag_truepicks(cfg, arrivals):

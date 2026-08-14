@@ -3,8 +3,6 @@ import numpy as np
 import os
 from setuptools import setup
 
-
-# Package meta-data.
 name            = "pyvorotomo"
 description     = "Version 2 of a Parsimonious Voronoi-cell based tomography code (originally by Fang et al., 2019)"
 url             = "https://github.com/filefolder/PyVoroTomo"
@@ -17,7 +15,7 @@ required        = [
     "mpi4py>=4.1.2",
     "numpy>=2.4.0",
     "pandas",
-    "pykonal>=0.5.4",
+    "pykonal>=0.5.5",
     "tables",
     "scipy>=1.16.0"
 ]
@@ -26,13 +24,11 @@ license         = "GNU GPLv3"
 
 here = os.path.abspath(os.path.dirname(__file__))
 
-# Load the package's __version__.py module as a dictionary.
 about = {}
 project_slug = name.lower().replace("-", "_").replace(" ", "_")
 with open(os.path.join(here, project_slug, "__version__.py")) as f:
     exec(f.read(), about)
 
-# Where the magic happens:
 setup(
     name=name,
     version=about["__version__"],
@@ -58,6 +54,7 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
+        "Programming Language :: Python :: 3.15",
         "Programming Language :: Python :: Implementation :: CPython",
         "Topic :: Scientific/Engineering :: Physics"
     ]

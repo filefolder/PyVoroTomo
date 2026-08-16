@@ -1648,26 +1648,27 @@ class InversionIterator(object):
             return
 
         n_under     = int(np.sum(informed_rpc < min_rays))
-        n_well      = int(np.sum(informed_rpc >= target_rpc * 0.5))
-
-        p10, p25, p50, p75, p90 = np.percentile(informed_rpc, [10, 25, 50, 75, 90])
+        #n_ok     = int(np.sum((informed_rpc >= min_rays) & (informed_rpc < target_rpc)))
+        n_target      = int(np.sum(informed_rpc >= target_rpc))
 
         logger.info(f"  Mesh diagnostic ({phase}, target {target_rpc} rays/cell):")
         logger.info(f"    {n_informed} populated cells: "
                     f"{n_under} ({100*n_under/n_informed:.1f}%) under min_rays ({min_rays}), "
-                    f"{n_well} ({100*n_well/n_informed:.1f}%) well-resolved")
+                    f"{n_target} ({100*n_target/n_informed:.1f}%) above")
+
+        p10, p25, p50, p75, p90 = np.percentile(informed_rpc, [10, 25, 50, 75, 90])
         logger.info(f"    rays-per-cell 10%: {p10:.0f}, 25%: {p25:.0f}, 50%: {p50:.0f}, 75%: {p75:.0f}, 90%: {p90:.0f}")
 
 
     # new! plot the first example mesh to build intuition
     def _plot_mesh_slices(self, depths, label="mesh"):
         """
-        Save bird's-eye (map-view) PNGs of the current Voronoi mesh
+        Save map-view images of the current Voronoi mesh
         (self.voronoi_cells) at the given depths (km), with station and
         depth-banded event overlays so mesh density reads against data coverage.
         Grid points are colored by the cell they fall in, using the same
         hvr-transformed nearest-cell assignment as the inversion. `label` (e.g.
-        the phase) only tags the filename/title. Root rank only.
+        the phase) only tags the filename/title.
         """
         if RANK != ROOT_RANK or self.voronoi_cells is None or not depths:
             return
@@ -1679,7 +1680,7 @@ class InversionIterator(object):
         center = (min_c + max_c) / 2.0
         hvr    = self.cfg["meshing"].get("hvr", 1.0)
         scale  = np.array([1.0, hvr, hvr])
-        band   = self.cfg["meshing"].get("plot_mesh_event_band_km", 15.0) # width of slice to group events in (TODO add to util)
+        band   = self.cfg["meshing"].get("plot_mesh_event_band_km", 15.0) # width of slice to group events in (hardwired)
         R      = _constants.EARTH_RADIUS
 
         tree = cKDTree(sph2xyz(center + (self.voronoi_cells - center) / scale))

@@ -1,10 +1,10 @@
 V2.1.2
 - Simplify KDE weighting scheme dramatically (solves pandas v3 issue)
+- Fix issue in meshing sometimes caused smaller mesh size targets from being reached
 - Add some scripts to illustrate meshing / features to plot meshing on 1st realization
 - Add feature to auto-merge separate event catalogs in the run config
 - Add additional raypath bottom mask filter BEFORE mesh generation
 - Add pyarrow dependency (and pandas>=2) to avoid py3.14 pickle related woes
-- Strengthen logic when KDE fitting fails
 - pykonal version bump to 0.5.5 which fixes L1 solver issue with teleseisms
 
 V2.1.1

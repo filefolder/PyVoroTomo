@@ -1221,7 +1221,7 @@ class InversionIterator(object):
     def _generate_voronoi_cells(self, phase):
         """
         Generate Voronoi cells via top-down density-aware refinement.
-     
+
         Algorithm:
             1. Generate a coarse uniform-random initial mesh, sized so that
                average cell width ~= max_cell_width_km. Initial seeds are
@@ -1257,34 +1257,35 @@ class InversionIterator(object):
 
         """
         if RANK == ROOT_RANK:
-     
+
             cfg               = self.cfg["meshing"]
             target_rpc        = cfg["target_rays_per_cell"]
             dg_weight         = cfg["density_to_gradient_weight"]
             size_jitter       = 0.2 # hardwired at 20%
             ray_subsample     = 0.8 # hardwired, re-select only 80% of rays (todo parameterize?)
+            ray_decimate    = self.cfg["meshing"].get("ray_decimate", 4) # decimate the rays (ONLY for cell creation). speeds things up        
             min_cell_width_km = cfg["min_cell_width_km"]
             max_cell_width_km = cfg["max_cell_width_km"]
             enable_backfill   = cfg["enable_backfill"]
-            max_passes        = 20 # hardwired at 20 / more than enough
+            max_passes        = 20 # hardwired / SHOULD be ok even with sparse joint inversions
             hvr               = cfg["hvr"]
-     
+
             dg_weight     = float(np.clip(dg_weight, 0.0, 1.0))
             ray_subsample = float(np.clip(ray_subsample, 0.25, 1.0))
-     
+
             target_rpc_real = max(
                 5,
                 int(target_rpc * np.random.uniform(1.0 - size_jitter,
                                                    1.0 + size_jitter))
             )
-     
+
             if phase == "P":
                 model = self.pwave_model
             elif phase == "S":
                 model = self.swave_model
             else:
                 raise ValueError(f"Unrecognized phase ({phase})")
-     
+
             min_coords = model.min_coords
             max_coords = model.max_coords
             delta      = max_coords - min_coords
@@ -1304,7 +1305,7 @@ class InversionIterator(object):
 
             center = (min_coords + max_coords) / 2.0
             scale = np.array([1.0/hvr, 1.0, 1.0]) # this is inverted relative to projected_ray_idxs.. we are only increasing vertical (rho) density
-     
+
             def _to_xyz(coords_sph):
                 """Apply hvr scaling, then convert spherical → cartesian (km)."""
                 if hvr != 1:
@@ -1333,11 +1334,30 @@ class InversionIterator(object):
             points  = points[in_bounds]
             ray_ids = ray_ids[in_bounds]
 
+            # Subsample rays for speed (hardwired at 80%)
             if ray_subsample < 1.0:
                 unique_rays = np.unique(ray_ids)
                 n_keep = max(10, int(len(unique_rays) * ray_subsample)) # stay above 10 at least..
                 keep_rays = np.random.choice(unique_rays, n_keep, replace=False)
                 keep_mask = np.isin(ray_ids, keep_rays)
+                points  = points[keep_mask]
+                ray_ids = ray_ids[keep_mask]
+
+            # Along-ray decimation: keep every K-th point per ray for the mesh only.
+            # The full raypaths are still used downstream in the sensitivity build --
+            # this only affects meshing kd-tree cost, which scales with total point count.
+            if ray_decimate > 1:
+                # Within each ray, keep every ray_decimate-th sample.
+                # Rays are already grouped in ray_ids (adjacent when sorted by ray_ids).
+                sort_idx = np.argsort(ray_ids, kind='stable')
+                points  = points[sort_idx]
+                ray_ids = ray_ids[sort_idx]
+                # Position of each point within its ray (0, 1, 2, ...)
+                _, group_starts = np.unique(ray_ids, return_index=True)
+                position_in_ray = np.arange(len(ray_ids)) - np.repeat(
+                    group_starts, np.diff(np.append(group_starts, len(ray_ids)))
+                )
+                keep_mask = (position_in_ray % ray_decimate) == 0
                 points  = points[keep_mask]
                 ray_ids = ray_ids[keep_mask]
 
@@ -1418,15 +1438,19 @@ class InversionIterator(object):
                 # downstream will do, so splitting decisions match real cell
                 # behavior. Avoids the capture-sphere overlap problem where the
                 # same ray gets counted in multiple sparse cells' spheres.
+                # Splitting decsion now uses cell footprint rather than nearest neighbor
+                # as was being under-estimated.
                 _, nearest_cell_per_point = seed_tree.query(points_xyz, k=1)
 
-                # Per-cell unique ray count
+                # Per-cell unique ray count AND footprint (median distance from seed to owned points)
                 n_cells = len(seeds_xyz)
                 cell_ray_counts = np.zeros(n_cells, dtype=int)
+                cell_footprint_km = np.zeros(n_cells)  # Voronoi-radius proxy from owned rays
                 # Group point indices by their owning cell
                 sort_idx = np.argsort(nearest_cell_per_point)
                 sorted_owners = nearest_cell_per_point[sort_idx]
                 sorted_rays   = ray_ids[sort_idx]
+                sorted_points = points_xyz[sort_idx]  # need points too, for footprint
                 # Find segment boundaries (where owner changes)
                 change_points = np.concatenate([
                     [0], np.where(np.diff(sorted_owners) != 0)[0] + 1, [len(sorted_owners)]
@@ -1436,7 +1460,12 @@ class InversionIterator(object):
                     if a == b:
                         continue
                     cell_id = sorted_owners[a]
-                    cell_ray_counts[cell_id] = len(np.unique(sorted_rays[a:b]))
+                    n_rays = len(np.unique(sorted_rays[a:b]))
+                    cell_ray_counts[cell_id] = n_rays
+                    if n_rays > target_rpc_real:
+                    # Median distance from this seed to the points it owns
+                        d = np.linalg.norm(sorted_points[a:b] - seeds_xyz[cell_id], axis=1)
+                        cell_footprint_km[cell_id] = np.mean(d) # mean is a bit faster vs median / doesn't matter?
 
                 # Decide which cells to split
                 cells_to_split = []
@@ -1446,7 +1475,7 @@ class InversionIterator(object):
                     # Split if over target AND splitting would not produce too-small cells.
                     # Children will be roughly r_cell / 2 wide after a split into 4.
                     if (n_rays_here > target_rpc_real and
-                        (min_cell_width_km == 0 or r_cell / 1.587 >= min_cell_width_km)): # n.b. 4^(1/3) = 1.587
+                        (min_cell_width_km == 0 or cell_footprint_km[i] >= min_cell_width_km)):
                         cells_to_split.append(i)
 
                 if not cells_to_split: # i.e. converged
@@ -1490,33 +1519,6 @@ class InversionIterator(object):
             seeds_sph = seeds_sph[keep]
             n_culled = n_pre_cull - len(seeds_sph)
 
-
-            # 6. Backfill model-volume gaps (optional, geometric)
-            """ OLD
-            n_data_cells = len(seeds_sph)
-            n_filler = 0
-            if enable_backfill and n_data_cells > 0:
-                seeds_xyz_arr = _to_xyz(seeds_sph)
-                seed_tree = cKDTree(seeds_xyz_arr)
-                if len(seeds_xyz_arr) >= 2:
-                    nn2, _ = seed_tree.query(seeds_xyz_arr, k=2)
-                    median_nn = np.median(nn2[:, 1])
-                else:
-                    median_nn = bbox_diag * 0.1
-                backfill_spacing = median_nn * 1.5
-
-                n_candidates = 12 ** 3 * 2
-                cands_sph = np.random.uniform(min_coords, max_coords,
-                                              size=(n_candidates, 3))
-
-                cands_xyz = _to_xyz(cands_sph)
-                d_to_nearest, _ = seed_tree.query(cands_xyz, k=1)
-                far_mask = d_to_nearest > backfill_spacing
-                filler_sph = cands_sph[far_mask]
-                n_filler = len(filler_sph)
-                if n_filler > 0:
-                    seeds_sph = np.vstack([seeds_sph, filler_sph])
-            """
 
             # 6. Optionally backfill model-volume gaps at the COARSE scale (max_cell_width_km)
             n_data_cells = len(seeds_sph)

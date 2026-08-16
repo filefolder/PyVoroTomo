@@ -1263,11 +1263,11 @@ class InversionIterator(object):
             dg_weight         = cfg["density_to_gradient_weight"]
             size_jitter       = 0.2 # hardwired at 20%
             ray_subsample     = 0.8 # hardwired, re-select only 80% of rays (todo parameterize?)
-            ray_decimate    = self.cfg["meshing"].get("ray_decimate", 4) # decimate the rays (ONLY for cell creation). speeds things up        
+            ray_decimate    = self.cfg["meshing"].get("ray_decimate", 4) # hardwired, decimate the rays (ONLY for cell creation, for speed)    
             min_cell_width_km = cfg["min_cell_width_km"]
             max_cell_width_km = cfg["max_cell_width_km"]
             enable_backfill   = cfg["enable_backfill"]
-            max_passes        = 20 # hardwired / SHOULD be ok even with sparse joint inversions
+            max_passes        = 24 # hardwired / SHOULD be ok even with sparse joint inversions
             hvr               = cfg["hvr"]
 
             dg_weight     = float(np.clip(dg_weight, 0.0, 1.0))
@@ -1438,23 +1438,17 @@ class InversionIterator(object):
                 # downstream will do, so splitting decisions match real cell
                 # behavior. Avoids the capture-sphere overlap problem where the
                 # same ray gets counted in multiple sparse cells' spheres.
-                # Splitting decsion now uses cell footprint rather than nearest neighbor
-                # as was being under-estimated.
                 _, nearest_cell_per_point = seed_tree.query(points_xyz, k=1)
 
                 # Per-cell unique ray count AND footprint (median distance from seed to owned points)
                 n_cells = len(seeds_xyz)
                 cell_ray_counts = np.zeros(n_cells, dtype=int)
-                cell_footprint_km = np.zeros(n_cells)  # Voronoi-radius proxy from owned rays
                 # Group point indices by their owning cell
                 sort_idx = np.argsort(nearest_cell_per_point)
                 sorted_owners = nearest_cell_per_point[sort_idx]
                 sorted_rays   = ray_ids[sort_idx]
-                sorted_points = points_xyz[sort_idx]  # need points too, for footprint
                 # Find segment boundaries (where owner changes)
-                change_points = np.concatenate([
-                    [0], np.where(np.diff(sorted_owners) != 0)[0] + 1, [len(sorted_owners)]
-                ])
+                change_points = np.concatenate([[0], np.where(np.diff(sorted_owners) != 0)[0] + 1, [len(sorted_owners)]])
                 for k in range(len(change_points) - 1):
                     a, b = change_points[k], change_points[k + 1]
                     if a == b:
@@ -1462,20 +1456,19 @@ class InversionIterator(object):
                     cell_id = sorted_owners[a]
                     n_rays = len(np.unique(sorted_rays[a:b]))
                     cell_ray_counts[cell_id] = n_rays
-                    if n_rays > target_rpc_real:
-                    # Median distance from this seed to the points it owns
-                        d = np.linalg.norm(sorted_points[a:b] - seeds_xyz[cell_id], axis=1)
-                        cell_footprint_km[cell_id] = np.mean(d) # mean is a bit faster vs median / doesn't matter?
 
                 # Decide which cells to split
                 cells_to_split = []
                 for i in range(n_cells):
                     n_rays_here = cell_ray_counts[i]
                     r_cell = nn_dists[i]
-                    # Split if over target AND splitting would not produce too-small cells.
-                    # Children will be roughly r_cell / 2 wide after a split into 4.
+                    # Split if over target AND resulting child cells will still meet the
+                    # minimum size requirement. With deterministic tetrahedron placement,
+                    # sibling nearest-neighbor distance is ~0.82 * parent_nn_dist, so post-split
+                    # cell diameter ≈ 2 * 0.82 * nn_dist ≈ 1.64 * nn_dist.
+                    # min_cell_width_km is the user-facing floor on cell diameter.
                     if (n_rays_here > target_rpc_real and
-                        (min_cell_width_km == 0 or cell_footprint_km[i] >= min_cell_width_km)):
+                        (min_cell_width_km == 0 or r_cell*1.64 >= min_cell_width_km)):
                         cells_to_split.append(i)
 
                 if not cells_to_split: # i.e. converged
@@ -1487,12 +1480,21 @@ class InversionIterator(object):
                 # randomly within the parent's neighborhood.
                 new_seeds_sph = []
                 keep_mask = np.ones(len(seeds_sph), dtype=bool)
+                tet__ = np.array([
+                    [ 1,  1,  1],
+                    [ 1, -1, -1],
+                    [-1,  1, -1],
+                    [-1, -1,  1],], dtype=float) / np.sqrt(3)
                 for i in cells_to_split:
                     keep_mask[i] = False
                     parent_xyz = seeds_xyz[i]
-                    r_split = nn_dists[i] * 0.5
-                    n_children = np.random.choice([3,4,5])
-                    offsets = np.random.normal(scale=r_split / 2.0, size=(n_children, 3))
+
+                    #r_split = nn_dists[i] * 0.5
+                    #n_children = np.random.choice([3,4,5])
+                    #offsets = np.random.normal(scale=r_split / 2.0, size=(n_children, 3))
+
+                    offsets = tet__ * (nn_dists[i] * 0.5)
+                 
                     children_xyz = parent_xyz + offsets
                     children_sph = _from_xyz(children_xyz)
                     children_sph = np.clip(children_sph, min_coords, max_coords)

@@ -13,11 +13,13 @@ packages        = ["pyvorotomo"]
 required        = [
     "KDEpy>=1.1.12",
     "mpi4py>=4.1.2",
+    "h5py>=3.15",
     "numpy>=2.4.0",
-    "pandas",
+    "scipy>=1.18.0",
+    "pandas>=2.3.3",
     "pykonal>=0.5.5",
-    "tables",
-    "scipy>=1.16.0"
+    "tables>=3.11.0",
+    "arrow>=1.4.0",
 ]
 scripts         = ["bin/pyvorotomo"]
 license         = "GNU GPLv3"

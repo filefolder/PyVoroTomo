@@ -476,21 +476,14 @@ class InversionIterator(object):
                     damp_excess=damp_excess, var_red=var_red, var_red_floor=var_red_floor)
 
 
-    def _ascii_lcurve(self, xx, yy, corner_idx=None, width=100, height=30):
-        """
-        Render an ASCII L-curve to a list of strings suitable for logger.info.
-        xx, yy are 1-D arrays (already log-transformed).
-        corner_idx is the index of the detected corner, marked with '*'.
-        """
+    def _ascii_lcurve(self, xx, yy, corner_idx=None, width=114, height=30):
         if len(xx) == 0:
             return ["(no points)"]
-        # Normalize to plot grid
         x_min, x_max = xx.min(), xx.max()
         y_min, y_max = yy.min(), yy.max()
         x_range = max(x_max - x_min, 1e-12)
         y_range = max(y_max - y_min, 1e-12)
         grid = [[" "] * width for _ in range(height)]
-        # Place each point. y axis is inverted (row 0 = top).
         for i, (x, y) in enumerate(zip(xx, yy)):
             col = int(round((x - x_min) / x_range * (width - 1)))
             row = int(round((1 - (y - y_min) / y_range) * (height - 1)))
@@ -498,15 +491,26 @@ class InversionIterator(object):
             row = max(0, min(height - 1, row))
             marker = "X" if i == corner_idx else "."
             grid[row][col] = marker
-        # Frame + axis labels
+
+        # Prefix each row with an axis label: top row shows y_max, bottom shows y_min,
+        # middle rows get padding to keep the plot aligned.
+        label_top = f"{y_max:6.2f} "
+        label_bot = f"{y_min:6.2f} "
+        label_pad = " " * len(label_top)
+
         lines = []
-        lines.append(f"  log||m|| = {y_max:.2f}")
-        lines.append("    +" + "-" * width + "+")
-        for row in grid:
-            lines.append("    |" + "".join(row) + "|")
-        lines.append("    +" + "-" * width + "+")
-        lines.append(f"  log||m|| = {y_min:.2f}    "
-                     f"log||r||: {x_min:.2f} .. {x_max:.2f}")
+        lines.append("log||m||")
+        lines.append(label_pad + "+" + "-" * width + "+")
+        for i, row in enumerate(grid):
+            if i == 0:
+                prefix = label_top
+            elif i == height - 1:
+                prefix = label_bot
+            else:
+                prefix = label_pad
+            lines.append(prefix + "|" + "".join(row) + "|")
+        lines.append(label_pad + "+" + "-" * width + "+")
+        lines.append(label_pad + f"log||r||:   {x_min:.2f}     <-------------------------------------------------------------->     {x_max:.2f}")
         return lines
 
 
@@ -662,7 +666,7 @@ class InversionIterator(object):
         # Perform automatic damping if damp < 0 (probably should be the default/only option)
         damp = self.cfg["algorithm"]["damp"]
 
-        if damp <= -10: # coarse bulk damping 
+        if damp <= -10: # coarse bulk damping (not used hopefully)
             # Use scipy's auto-damping heuristic + iteration scaling.
             # ||G||_F is a reliable scale for the matrix; small fraction of that is
             # the canonical Tikhonov damping anchor.
@@ -825,10 +829,11 @@ class InversionIterator(object):
             # Collapse to a representative scalar for the 1D path and logging.
             damp = np.mean(damp)
 
+        # damp == 0
         else:
             result = scipy.sparse.linalg.lsmr(
                 weighted_sensitivity, weighted_residuals, 
-                damp=damp, atol=atol, btol=btol, conlim=conlim, maxiter=maxiter, show=False
+                damp=0, atol=atol, btol=btol, conlim=conlim, maxiter=maxiter, show=False
             )
             x, istop, itn, normr, normar, norma, conda, normx = result
 
@@ -964,7 +969,7 @@ class InversionIterator(object):
         stationused = stationused.set_index(index_keys)
         nstation = int(stationused['idx'].max() + 1)
 
-        # raypath bottom filter
+        # raypath bottom filter (need to do this here in addition to sample_raypaths)
         raypath_filter_min,raypath_filter_max = self.cfg["algorithm"].get("raypath_bottom_mask", [-1,-1])
         num_raypath_bottom_filtered = 0
 
@@ -1573,6 +1578,7 @@ class InversionIterator(object):
             )
 
         self.synchronize(attrs=["voronoi_cells"])
+
         return True
 
 
@@ -1950,6 +1956,10 @@ class InversionIterator(object):
             6371 - self.pwave_model.max_coords[0]
         ))
 
+        # Check if we're removing any rays bottoming near moho BEFORE meshing
+        raypath_filter_min, raypath_filter_max = self.cfg["algorithm"].get("raypath_bottom_mask")
+        do_bottom_filter = raypath_filter_min < raypath_filter_max
+
         arrivals = self.sampled_arrivals.set_index(["network", "station"]).sort_index()
         index = arrivals.index.unique()
         events = self.events.set_index("event_id")
@@ -1977,6 +1987,17 @@ class InversionIterator(object):
                         n_pts = len(rho)
                         if n_pts == 0:
                             continue
+
+                        if do_bottom_filter:
+                            # Bottom of the ray = shallowest rho = deepest depth
+                            ray_bottom_depth = 6371.0 - float(np.min(rho))
+                            # Also skip filter if the event itself is in the mask range
+                            ev_id = event_ids.iloc[j]  # or event_ids for single-event branch
+                            ev_depth = events.loc[ev_id, "depth"]
+                            if not (raypath_filter_min < ev_depth < raypath_filter_max):
+                                if raypath_filter_min < ray_bottom_depth < raypath_filter_max:
+                                    continue  # skip this ray from the mesh-building cloud
+
                         one_ray = np.column_stack([rho, theta, phi])  # (n_pts, 3)
                         point_chunks.append(one_ray)
                         ray_id_chunks.append(np.full(n_pts, next_ray_id, dtype=np.int32))
@@ -2968,95 +2989,111 @@ class InversionIterator(object):
             data_iqr = iqr(data, axis=0)
             data_median = np.median(data, axis=0)
 
-            # Handle zero-variance dimensions
+            # Handle zero-variance dimensions (mostly for teleseisms)
+            skip_kde = False
             mask_zero_iqr = data_iqr == 0
+            #if np.any(mask_zero_iqr):
+            #    logger.warning(f"Zero variance detected in dimensions: {np.array(kde_columns)[mask_zero_iqr]}   ###")
+            #    data_iqr[mask_zero_iqr] = np.median(data_iqr[~mask_zero_iqr])
             if np.any(mask_zero_iqr):
-                logger.warning(f"Zero variance detected in dimensions: {np.array(kde_columns)[mask_zero_iqr]}   ###")
-                data_iqr[mask_zero_iqr] = np.median(data_iqr[~mask_zero_iqr])
+                dropped = np.array(kde_columns)[mask_zero_iqr]
+                logger.warning(f"Zero variance events detected, dropping from KDE: {list(dropped)}   ###")
+                keep = ~mask_zero_iqr
+                data = data[:, keep]
+                data_iqr = data_iqr[keep]
+                data_median = data_median[keep]
+                kde_columns = list(np.array(kde_columns)[keep])
+                ndim = len(kde_columns)
+                if ndim == 0:
+                    # All dimensions degenerate — assign uniform weights and skip KDE
+                    weights = np.ones(len(events))
+                    weights = weights / weights.sum()
+                    skip_kde = True
 
-            # Normalize
-            data_normalized = (data - data_median) / data_iqr
-
-            # Compute robust bandwidth using Scott's rule (which seems to be a bit larger than Silverman)
-            n, d = data_normalized.shape
-            sigma = np.std(data_normalized, ddof=1)
-            bandwidth_scott = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma 
-            #bandwidth_silverman = (n * (d + 2) / 4)**(-1. / (d + 4)) * sigma
-            bandwidth = bandwidth_scott
-
-            try:
-                # Fit and evaluate KDE
-                kde = kp.FFTKDE(kernel='gaussian',bw=bandwidth).fit(data_normalized)
-                points, values = kde.evaluate(npts)
-
-                # Reshape grid points and values
-                points = [np.unique(points[:,i]) for i in range(ndim)]
-                values = values.reshape((npts,) * ndim)
-
-                # Create interpolator with more robust error handling
-                interpolator = scipy.interpolate.RegularGridInterpolator(
-                    points,
-                    values,
-                    method='linear',
-                    bounds_error=False,
-                    fill_value=np.max(values)
-                )
-
-                # Compute densities at data points
-                densities = interpolator(data_normalized)
-
-                # Favor events in sparse (low-density) regions, strongly at first and
-                # relaxing to uniform as the inversion converges. exp(-beta*d) is bounded
-                # (no 1/density blow-up), and beta tapers to 0 by the final iteration.
-                valid = np.isfinite(densities) & (densities > 0)
-                d = densities / np.median(densities[valid])          # scale-free (median -> 1)
-                beta = self.cfg["algorithm"].get("weight_strength", 1.0)
-                beta *= max(0.0, 1.0 - self.iiter / max(self.niter - 1, 1))
-                weights = np.exp(-beta * d)
-
+            if not skip_kde:
                 # Normalize
-                weight_sum = weights.sum()
-                if weight_sum > 0:
-                    weights = weights / weight_sum
-                else:
-                    logger.warning("  KDE event weights sum to zero (!), using uniform weights   ###")
-                    weights = np.ones(len(weights)) / len(weights)
+                data_normalized = (data - data_median) / data_iqr
 
-                # Set any problem infinite or NaN values to 0
-                bad_values = ~np.isfinite(weights)
-                if np.any(bad_values):
-                    logger.warning(f"Found {np.sum(bad_values)} infinite/NaN in KDE event weights (!!) setting to 0   ###")
-                weights[bad_values] = 0
+                # Compute robust bandwidth using Scott's rule (which seems to be a bit larger than Silverman)
+                n, d = data_normalized.shape
+                sigma = np.std(data_normalized, ddof=1)
+                bandwidth_scott = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma 
+                #bandwidth_silverman = (n * (d + 2) / 4)**(-1. / (d + 4)) * sigma
+                bandwidth = bandwidth_scott
 
-                # Set em!
-                events["weight"] = weights
-                self.events = events
+                try:
+                    # Fit and evaluate KDE
+                    kde = kp.FFTKDE(kernel='gaussian',bw=bandwidth).fit(data_normalized)
+                    points, values = kde.evaluate(npts)
 
-                logger.info(f"  (event bandwidth = {bandwidth:.2f})   ###")
+                    # Reshape grid points and values
+                    points = [np.unique(points[:,i]) for i in range(ndim)]
+                    values = values.reshape((npts,) * ndim)
 
-                # >>> COMPLETELY SEPARATE RESIDUAL ANALYSIS but may as well warn about it here (TODO organize sanely?)
-
-                # Check for NaN values and warn
-                residuals = events['residual']
-                nan_count = residuals.isna().sum()
-                if nan_count > 0:
-                    logger.warning(f"Found {nan_count} events with NaN residuals   ###")
-
-                # Calculate/print residual statistics
-                valid_residuals = residuals.dropna()
-                if len(valid_residuals) > 0:
-                    logger.info(
-                        f"mean event residual (s): {valid_residuals.mean():.4f} "
-                        f"({valid_residuals.std():.4f} std)   ###"
+                    # Create interpolator with more robust error handling
+                    interpolator = scipy.interpolate.RegularGridInterpolator(
+                        points,
+                        values,
+                        method='linear',
+                        bounds_error=False,
+                        fill_value=np.max(values)
                     )
-                else:
-                    logger.warning("No valid event residuals found - all are NaN!!!   ###")
 
-            except Exception as e:
-                logger.error(f"KDE fitting failed: {str(e)}")
-                events["weight"] = 1.0
-                self.events = events
-                return False
+                    # Compute densities at data points
+                    densities = interpolator(data_normalized)
+
+                    # Favor events in sparse (low-density) regions, strongly at first and
+                    # relaxing to uniform as the inversion converges. exp(-beta*d) is bounded
+                    # (no 1/density blow-up), and beta tapers to 0 by the final iteration.
+                    valid = np.isfinite(densities) & (densities > 0)
+                    d = densities / np.median(densities[valid])          # scale-free (median -> 1)
+                    beta = self.cfg["algorithm"].get("weight_strength", 1.0)
+                    beta *= max(0.0, 1.0 - self.iiter / max(self.niter - 1, 1))
+                    weights = np.exp(-beta * d)
+
+                    # Normalize
+                    weight_sum = weights.sum()
+                    if weight_sum > 0:
+                        weights = weights / weight_sum
+                    else:
+                        logger.warning("  KDE event weights sum to zero (!), using uniform weights   ###")
+                        weights = np.ones(len(weights)) / len(weights)
+
+                    # Set any problem infinite or NaN values to 0
+                    bad_values = ~np.isfinite(weights)
+                    if np.any(bad_values):
+                        logger.warning(f"Found {np.sum(bad_values)} infinite/NaN in KDE event weights (!!) setting to 0   ###")
+                    weights[bad_values] = 0
+
+                except Exception as e:
+                    logger.error(f"KDE fitting failed: {str(e)}")
+                    weights = np.ones(len(events))
+                    weights = weights / weights.sum()
+
+            # Set em!
+            events["weight"] = weights
+            self.events = events
+
+            logger.info(f"  (event bandwidth = {bandwidth:.2f})   ###")
+
+            # >>> COMPLETELY SEPARATE RESIDUAL ANALYSIS but may as well warn about it here (TODO organize sanely?)
+
+            # Check for NaN values and warn
+            residuals = events['residual']
+            nan_count = residuals.isna().sum()
+            if nan_count > 0:
+                logger.warning(f"Found {nan_count} events with NaN residuals   ###")
+
+            # Calculate/print residual statistics
+            valid_residuals = residuals.dropna()
+            if len(valid_residuals) > 0:
+                logger.info(
+                    f"mean event residual (s): {valid_residuals.mean():.4f} "
+                    f"({valid_residuals.std():.4f} std)   ###"
+                )
+            else:
+                logger.warning("No valid event residuals found - all are NaN!!!   ###")
+
 
         self.synchronize(attrs=["events"])
         return True
@@ -3118,64 +3155,82 @@ class InversionIterator(object):
                 data_iqr = iqr(data, axis=0)
                 data_median = np.median(data, axis=0)
 
-                # Handle zero-variance dimensions
+                # Handle zero-variance dimensions (mostly teleseis)
+                skip_kde = False
                 mask_zero_iqr = data_iqr == 0
+                #if np.any(mask_zero_iqr):
+                #    logger.warning(f"Zero variance detected in dimensions: {np.array(kde_columns)[mask_zero_iqr]}   ###")
+                #    data_iqr[mask_zero_iqr] = np.median(data_iqr[~mask_zero_iqr])
+
                 if np.any(mask_zero_iqr):
-                    logger.warning(f"Zero variance detected in dimensions: {np.array(kde_columns)[mask_zero_iqr]}   ###")
-                    data_iqr[mask_zero_iqr] = np.median(data_iqr[~mask_zero_iqr])
+                    dropped = np.array(kde_columns)[mask_zero_iqr]
+                    logger.warning(f"Zero variance in arrivals detected, dropping from KDE: {list(dropped)}   ###")
+                    keep = ~mask_zero_iqr
+                    data = data[:, keep]
+                    data_iqr = data_iqr[keep]
+                    data_median = data_median[keep]
+                    kde_columns = list(np.array(kde_columns)[keep])
+                    ndim = len(kde_columns)
+                    if ndim == 0:
+                        # All dimensions degenerate — assign uniform weights and skip KDE
+                        logger.warning("All dimensions degenerate, setting equal weights")
+                        weights = np.ones(len(arrivals))
+                        weights = weights / weights.sum()
+                        skip_kde = True
+                
+                if not skip_kde:
+                    data_normalized = (data - data_median) / data_iqr
 
-                data_normalized = (data - data_median) / data_iqr
+                    # Compute Scott's bandwidth
+                    n, d = data_normalized.shape
+                    sigma = np.std(data_normalized, ddof=1)
+                    bandwidth_scott = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma 
+                    #bandwidth_silverman = (n * (d + 2) / 4)**(-1. / (d + 4)) * sigma
+                    bandwidth = bandwidth_scott
 
-                # Compute Scott's bandwidth
-                n, d = data_normalized.shape
-                sigma = np.std(data_normalized, ddof=1)
-                bandwidth_scott = (4 / (n * (2 * d + 1)))**(1 / (d + 4)) * sigma 
-                #bandwidth_silverman = (n * (d + 2) / 4)**(-1. / (d + 4)) * sigma
-                bandwidth = bandwidth_scott
+                    # Fit and evaluate KDE
+                    kde = kp.FFTKDE(kernel='gaussian',bw=bandwidth).fit(data_normalized)
+                    points, values = kde.evaluate(npts)
+                    points = [np.unique(points[:,i]) for i in range(ndim)]
+                    values = values.reshape((npts,) * ndim)
 
-                # Fit and evaluate KDE
-                kde = kp.FFTKDE(kernel='gaussian',bw=bandwidth).fit(data_normalized)
-                points, values = kde.evaluate(npts)
-                points = [np.unique(points[:,i]) for i in range(ndim)]
-                values = values.reshape((npts,) * ndim)
+                    # Interpolate densities
+                    interpolator = scipy.interpolate.RegularGridInterpolator(
+                        points,
+                        values,
+                        method='linear',
+                        bounds_error=False,
+                        fill_value=np.max(values)
+                    )
+                    densities = interpolator(data_normalized)
 
-                # Interpolate densities
-                interpolator = scipy.interpolate.RegularGridInterpolator(
-                    points,
-                    values,
-                    method='linear',
-                    bounds_error=False,
-                    fill_value=np.max(values)
-                )
-                densities = interpolator(data_normalized)
+                    # For arrivals, favor picks in sparse (low-density) regions with the
+                    # same bounded scheme, held constant across iterations.
+                    valid = np.isfinite(densities) & (densities > 0)
+                    d = densities / np.median(densities[valid])          # scale-free (median -> 1)
+                    beta = self.cfg["algorithm"].get("weight_strength", 1.0)
+                    weights = np.exp(-beta * d)
 
-                # For arrivals, favor picks in sparse (low-density) regions with the
-                # same bounded scheme, held constant across iterations.
-                valid = np.isfinite(densities) & (densities > 0)
-                d = densities / np.median(densities[valid])          # scale-free (median -> 1)
-                beta = self.cfg["algorithm"].get("weight_strength", 1.0)
-                weights = np.exp(-beta * d)
+                    # Ground-truth picks always carry the maximum weight
+                    if "truepick" in arrivals.columns:
+                        is_true = arrivals["truepick"].fillna(False).astype(bool).values
+                        if is_true.any():
+                            weights[is_true] = weights.max()
 
-                # Ground-truth picks always carry the maximum weight
-                if "truepick" in arrivals.columns:
-                    is_true = arrivals["truepick"].fillna(False).astype(bool).values
-                    if is_true.any():
-                        weights[is_true] = weights.max()
+                    # Normalize (bounded weights -> no outlier cap; without-replacement
+                    # feasibility is enforced at sample time)
+                    weight_sum = weights.sum()
+                    if weight_sum > 0:
+                        weights = weights / weight_sum
+                    else:
+                        logger.warning(f"  KDE arrival weights sum to zero for {phase} (!), using uniform weights   ###")
+                        weights = np.ones(len(weights)) / len(weights)
 
-                # Normalize (bounded weights -> no outlier cap; without-replacement
-                # feasibility is enforced at sample time)
-                weight_sum = weights.sum()
-                if weight_sum > 0:
-                    weights = weights / weight_sum
-                else:
-                    logger.warning(f"  KDE arrival weights sum to zero for {phase} (!), using uniform weights   ###")
-                    weights = np.ones(len(weights)) / len(weights)
-
-                # Set any infinite or NaN values to 0
-                bad_values = ~np.isfinite(weights)
-                if np.any(bad_values):
-                    logger.warning(f"Found {np.sum(bad_values)} infinite/NaN in KDE arrival weights (!!) setting to 0   ###")
-                weights[bad_values] = 0
+                    # Set any infinite or NaN values to 0
+                    bad_values = ~np.isfinite(weights)
+                    if np.any(bad_values):
+                        logger.warning(f"Found {np.sum(bad_values)} infinite/NaN in KDE arrival weights (!!) setting to 0   ###")
+                    weights[bad_values] = 0
 
                 # Set em!
                 arrivals["weight"] = weights
@@ -3200,8 +3255,30 @@ class InversionIterator(object):
                 )
 
             except Exception as e:
-                logger.error(f"Failed to update arrival weights: {str(e)}")
-                return False
+                logger.error(f"Failed to update arrival weights: {str(e)}"
+                    "\n  ...setting all weights equal")
+
+                weights = np.ones(len(arrivals))
+                arrivals["weight"] = weights / weights.sum()
+
+                # Update self.arrivals with new weights
+                index_columns = ["network", "station", "event_id", "phase"]
+                arrivals = arrivals.set_index(index_columns)
+                _arrivals = self.arrivals.set_index(index_columns).sort_index()
+                _arrivals.loc[arrivals.index, "weight"] = arrivals["weight"]
+                self.arrivals = _arrivals.reset_index()
+
+                # Log statistics
+                valid_arrivals = arrivals[abs(arrivals['residual']) <= max_arr_resid]['residual']
+                #logger.info(f"  ({phase} arrival bandwidth = {bandwidth:.2f})   ###")
+                logger.info(
+                    f"mean {phase} arrival residual (s)     : "
+                    f"{valid_arrivals.mean():.4f} ({valid_arrivals.std():.4f} std)   ###"
+                )
+                logger.info(
+                    f"   mean abs arrival residual (s): "
+                    f"{valid_arrivals.abs().mean():.4f} ({valid_arrivals.abs().std():.4f} std)   ###"
+                )
 
         self.synchronize(attrs=["arrivals"])
         return True
@@ -3827,8 +3904,8 @@ class InversionIterator(object):
                 delta_tele_max_deg = 0.002 # +/- 0.2 km horizontal piercepoint migration per iteration?
                 delta_tele_dtheta = np.radians(delta_tele_max_deg)
                 delta_tele_dphi = delta_tele_dtheta * np.cos(np.radians(self._model_lat_center))
-                delta_tele_dz = 0.0001 # km, essentially clamped
-                delta_tele_dt = 0.0001 # sec, ditto
+                delta_tele_dz = 0.001 # km, essentially clamped
+                delta_tele_dt = 0.05 # sec, loosening this up a tiny bit seems to help (TODO review)
                 delta_tele = np.array(
                     [delta_tele_dz,delta_tele_dtheta,delta_tele_dphi,delta_tele_dt],
                     dtype=_constants.DTYPE_REAL
@@ -4362,23 +4439,37 @@ class InversionIterator(object):
     @_utilities.log_errors(logger)
     @_utilities.root_only(RANK)
     def save_events(self):
-        """ Save the current "events", and "arrivals" to and HDF5 file using pandas.HDFStore """
+        """
+        Save the current "events", and "arrivals" to and HDF5 file using pandas.HDFStore
+        Also an opportunity to truncate some numerical precision
+
+        """
         logger.info(f"Saving event data from iteration #{self.iiter}")
 
         path = os.path.join(self.cfg['model']['output_dir'], f"{self.iiter:02d}")
 
-        events       = self.events
-        EVENT_DTYPES = _constants.EVENT_DTYPES
-        for column in EVENT_DTYPES:
-            events[column] = events[column].astype(EVENT_DTYPES[column])
+        events = self.events.copy()
+        events = events.astype(
+            {c: dt for c, dt in _constants.EVENT_DTYPES.items() if c in events.columns}
+        )
+        events["depth"] = events["depth"].round(2)
 
-        arrivals       = self.arrivals
-        ARRIVAL_DTYPES = _constants.ARRIVAL_DTYPES
-        for column in ARRIVAL_DTYPES:
-            arrivals[column] = arrivals[column].astype(ARRIVAL_DTYPES[column])
+        arrivals = self.arrivals.copy()
+        arrivals = arrivals.astype(
+            {c: dt for c, dt in _constants.ARRIVAL_DTYPES.items() if c in arrivals.columns}
+        )
+        for col in ("delta", "slant_dist"):
+            if col in arrivals.columns:
+                arrivals[col] = arrivals[col].round(2)
 
-        events.to_hdf(f"{path}.events.h5", key="events", complevel=5, complib="zlib")
-        arrivals.to_hdf(f"{path}.events.h5", key="arrivals", complevel=5, complib="zlib")
+        # TODO probably change these everywhere also
+        #for col in ("network", "station", "phase"):
+        #      if col in arrivals.columns:
+        #          arrivals[col] = arrivals[col].astype("category")
+
+        out = f"{path}.events.h5"
+        events.to_hdf(out, key="events", complevel=5, complib="zlib")
+        arrivals.to_hdf(out, key="arrivals", complevel=5, complib="zlib")
 
         return True
 
@@ -4448,9 +4539,77 @@ class InversionIterator(object):
 
         return True
 
+    @_utilities.log_errors(logger)
+    def _bcast_dataframe(self, attr):
+        """
+        Broadcast a DataFrame via Arrow IPC bytes — avoids pickle and its
+        Python-version compatibility issues.
+        """
+        import pyarrow as pa
+
+        if RANK == ROOT_RANK:
+            df = getattr(self, attr)
+            if df is None:
+                payload = None
+            else:
+                table = pa.Table.from_pandas(df, preserve_index=False)
+                sink = pa.BufferOutputStream()
+                with pa.ipc.new_stream(sink, table.schema) as writer:
+                    writer.write_table(table)
+                payload = sink.getvalue().to_pybytes()
+            size = len(payload) if payload is not None else 0
+        else:
+            payload = None
+            size = 0
+
+        # Broadcast size first so workers can allocate
+        size = COMM.bcast(size, root=ROOT_RANK)
+        if size == 0:
+            setattr(self, attr, None if RANK != ROOT_RANK else getattr(self, attr))
+            return
+
+        payload = COMM.bcast(payload, root=ROOT_RANK)
+
+        if RANK != ROOT_RANK:
+            with pa.ipc.open_stream(pa.BufferReader(payload)) as reader:
+                table = reader.read_all()
+            df = table.to_pandas()
+            setattr(self, attr, df)
+
 
     @_utilities.log_errors(logger)
     def synchronize(self, attrs="all"):
+        _all = (
+            "arrivals", "arrival_history", "cfg", "events", "event_history",
+            "projection_matrix", "pwave_model", "swave_model",
+            "gradient_magnitude", "grid_coords",
+            "sampled_arrivals", "sampled_events",
+            "stations", "step_size", "voronoi_cells"
+        )
+
+        # These get the pickle-free path
+        DATAFRAME_ATTRS = {
+            "arrivals", "arrival_history", "events", "event_history",
+            "sampled_arrivals", "sampled_events", "stations",
+        }
+
+        if attrs == "all":
+            attrs = _all
+
+        for attr in attrs:
+            if attr in DATAFRAME_ATTRS:
+                self._bcast_dataframe(attr)   # or _via_scratch
+            else:
+                value = getattr(self, attr) if RANK == ROOT_RANK else None
+                value = COMM.bcast(value, root=ROOT_RANK)
+                setattr(self, attr, value)
+
+        COMM.barrier()
+        return True
+
+
+    @_utilities.log_errors(logger)
+    def synchronize_old(self, attrs="all"):
         """
         Synchronize input data across all processes.
         'attrs' may be an iterable of attribute names to synchronize.
